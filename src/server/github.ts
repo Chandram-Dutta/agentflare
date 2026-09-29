@@ -13,7 +13,9 @@ async function github(path: string, token: string, body?: object) {
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
-    redirect: "error",
+    // Workers does not implement redirect: "error". Reject 3xx below instead
+    // of following redirects with GitHub credentials.
+    redirect: "manual",
   });
   if (!response.ok)
     throw new HTTPException(
