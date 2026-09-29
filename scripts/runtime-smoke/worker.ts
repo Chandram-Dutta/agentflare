@@ -40,8 +40,13 @@ const worker = {
         working: await sandbox.inspectWorkspace("diff", "README.md", false),
       });
     }
-    if (url.pathname === "/terminal")
-      return sandbox.connectWorkspace(request, 100, 30);
+    if (url.pathname === "/terminal") {
+      const shell = await sandbox.prepareTerminal();
+      if (!shell)
+        return new Response("Start this thread first.", { status: 409 });
+      const session = await sandbox.getSession("agent");
+      return session.terminal(request, { cols: 100, rows: 30, shell });
+    }
     if (url.pathname === "/pid")
       return Response.json(
         await sandbox.exec("ps -eo pid,args | grep '[c]odex'"),

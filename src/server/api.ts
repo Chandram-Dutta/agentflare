@@ -456,7 +456,16 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
     const rows = size.safeParse(c.req.query("rows") ?? 24);
     if (!cols.success || !rows.success)
       return c.json({ error: "Invalid terminal size." }, 400);
-    return sandbox.connectWorkspace(c.req.raw, cols.data, rows.data);
+    const shell = await sandbox.prepareTerminal();
+    if (!shell) return c.json({ error: "Start this thread first." }, 409);
+    const session = await sandbox.getSession("agent");
+    // The SDK forwards this upgrade through stub.fetch(), not RPC: a
+    // Response containing a WebSocket cannot be serialized as an RPC result.
+    return session.terminal(c.req.raw, {
+      cols: cols.data,
+      rows: rows.data,
+      shell,
+    });
   }
   try {
     return c.json(

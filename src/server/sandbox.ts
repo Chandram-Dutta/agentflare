@@ -82,17 +82,12 @@ export class ThreadSandbox extends Sandbox {
       );
   }
 
-  async connectWorkspace(
-    request: Request,
-    cols: number,
-    rows: number,
-  ): Promise<Response> {
+  async prepareTerminal(): Promise<AgentId | null> {
     const state = await this.workspaceStatus();
-    if (!state.started || !state.agent)
-      return new Response("Start this thread first.", { status: 409 });
+    if (!state.started || !state.agent) return null;
     await this.requireWorkspace();
-    const session = await this.getSession("agent");
-    return session.terminal(request, { cols, rows, shell: state.agent });
+    // Only serializable data may cross RPC; WebSocket upgrades use fetch.
+    return state.agent;
   }
 
   async inspectWorkspace(operation: string, path = "", staged = false) {
