@@ -1,260 +1,544 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import Link from "next/link";
-import {
-  ArrowRight,
-  Box,
-  Check,
-  Command,
-  GitBranch,
-  GitFork,
-  SquareTerminal,
-  Zap,
-} from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
+import { ThemeProvider, useTheme } from "next-themes";
+import { Moon, Plus, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { TerminalPreview } from "@/components/terminal-preview";
-import { agents, type AgentId } from "@/lib/workspace";
+import { ProjectSettings } from "@/components/project-settings";
+import { apiRequest } from "@/lib/api-client";
+import {
+  agents,
+  type AgentId,
+  type Project,
+  type Thread,
+  type WorkspaceData,
+} from "@/lib/workspace";
+
+type Session = {
+  configured: boolean;
+  user: { id: string; name: string } | null;
+};
 
 export function Workspace() {
-  const [agent, setAgent] = useState<AgentId>("claude");
-  const [repository, setRepository] = useState("");
-  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(
-    null,
+  return (
+    <ThemeProvider
+      attribute="class"
+      storageKey="agentflare-theme"
+      defaultTheme="system"
+      enableSystem
+      disableTransitionOnChange
+    >
+      <WorkspaceContent />
+    </ThemeProvider>
   );
+}
+
+function WorkspaceContent() {
+  const { resolvedTheme, setTheme } = useTheme();
+  const [session, setSession] = useState<Session | null>(null);
+  const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
 
-  async function checkConfiguration(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setPending(true);
-    setResult(null);
-    try {
-      const response = await fetch("/api/workspace-config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repository, agent }),
+  useEffect(() => {
+    let cancelled = false;
+    void apiRequest<Session>("/session")
+      .then((result) => {
+        if (cancelled) return;
+        setSession(result);
+        if (
+          new URLSearchParams(window.location.search).get("auth") === "failed"
+        ) {
+          setError(
+            "GitHub sign-in failed. Check that your account is allowed by this installation.",
+          );
+        }
+      })
+      .catch((error: Error) => {
+        if (!cancelled) setError(error.message);
       });
-      if (!response.ok) {
-        setResult({
-          ok: false,
-          message:
-            "Use a GitHub repository root URL without credentials, query parameters or a subpath.",
-        });
-      } else {
-        setResult({
-          ok: true,
-          message:
-            "Configuration format checked. Repository access and agent credentials have not been checked. Nothing has been launched.",
-        });
-      }
-    } catch {
-      setResult({ ok: false, message: "Could not reach the API. Try again." });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function signIn() {
+    setPending(true);
+    setError("");
+    try {
+      const { url } = await apiRequest<{ url: string }>(
+        "/auth/sign-in/social",
+        "POST",
+        {},
+      );
+      window.location.assign(url);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Sign-in failed.");
+      setPending(false);
+    }
+  }
+
+  async function signOut() {
+    setPending(true);
+    setError("");
+    try {
+      await apiRequest("/auth/sign-out", "POST", {});
+      setSession({ configured: true, user: null });
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Sign-out failed.");
     } finally {
       setPending(false);
     }
   }
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="flex h-16 items-center justify-between border-b px-5 md:px-9">
-        <Link
-          href="/"
-          className="flex items-center gap-2.5 text-lg font-semibold tracking-tight"
-        >
-          <Zap
-            className="size-5 fill-primary text-primary"
-            aria-hidden="true"
-          />
-          agentflare
-        </Link>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="hidden sm:inline">Development workspaces</span>
-          <span className="rounded-md border px-2 py-1 font-mono text-[10px] tracking-wider">
-            LOCAL PREVIEW
-          </span>
+    <div className="flex min-h-dvh flex-col">
+      <header className="flex h-12 shrink-0 items-center justify-between border-b px-4">
+        <h1 className="text-sm font-normal">
+          agentflare<span className="text-primary">_</span>
+        </h1>
+        <div className="flex min-w-0 items-center gap-3">
+          {session?.user && (
+            <>
+              <span className="max-w-32 truncate text-[11px] text-muted-foreground">
+                {session.user.name}
+              </span>
+              <Button
+                variant="ghost"
+                className="h-7 rounded-none text-xs font-normal"
+                disabled={pending}
+                onClick={signOut}
+              >
+                sign out
+              </Button>
+            </>
+          )}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="rounded-none"
+            aria-label="Toggle color theme"
+            title="Toggle color theme"
+            onClick={() =>
+              setTheme(resolvedTheme === "dark" ? "light" : "dark")
+            }
+          >
+            <Moon className="size-4 dark:hidden" aria-hidden="true" />
+            <Sun className="hidden size-4 dark:block" aria-hidden="true" />
+          </Button>
         </div>
       </header>
-
-      <main className="mx-auto w-full max-w-[1500px] flex-1 px-5 py-9 md:px-9 md:py-12">
-        <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <div className="mb-3 flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.15em] text-muted-foreground">
-              <Box className="size-3.5" />
-              New workspace
-            </div>
-            <h1 className="text-3xl font-medium tracking-tight">
-              Your agent. Your terminal.
-            </h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Bring a repository. Pick a CLI. Work the way you already do.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="size-1.5 rounded-full bg-amber-400" />
-            No sandbox connected
-          </div>
+      {error && (
+        <div className="flex items-center justify-between gap-4 border-b px-4 py-3 text-xs">
+          <p role="alert" className="text-destructive">
+            {error}
+          </p>
+          <Button
+            variant="ghost"
+            className="rounded-none text-xs"
+            onClick={() => window.location.reload()}
+          >
+            reload
+          </Button>
         </div>
-
-        <div className="grid overflow-hidden rounded-xl border bg-[#151619] lg:grid-cols-[320px_minmax(0,1fr)]">
-          <section
-            className="border-b bg-[#18191c] p-6 lg:border-r lg:border-b-0"
-            aria-labelledby="setup-heading"
-          >
-            <h2 id="setup-heading" className="text-sm font-medium">
-              Workspace configuration
-            </h2>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              The environment around your agent.
+      )}
+      {session?.user ? (
+        <SavedWorkspace />
+      ) : (
+        <main className="mx-auto mt-16 w-full max-w-lg px-6 text-xs sm:mt-28">
+          {!session ? (
+            <p role="status" className="text-muted-foreground">
+              {error
+                ? "Unable to load this installation."
+                : "loading workspace…"}
             </p>
-            <form onSubmit={checkConfiguration} className="mt-7 space-y-7">
-              <div className="space-y-2.5">
-                <Label htmlFor="repository" className="text-xs">
-                  <GitFork className="size-3.5" />
-                  Repository
-                </Label>
-                <Input
-                  id="repository"
-                  required
-                  type="url"
-                  value={repository}
-                  disabled={pending}
-                  onChange={(event) => {
-                    setRepository(event.target.value);
-                    setResult(null);
-                  }}
-                  placeholder="https://github.com/owner/repo"
-                  className="h-10 text-xs"
-                  aria-describedby="repository-help"
-                />
-                <p
-                  id="repository-help"
-                  className="text-[11px] leading-5 text-muted-foreground"
-                >
-                  GitHub is not connected yet. This checks the URL format only.
-                </p>
-              </div>
-              <fieldset disabled={pending}>
-                <legend className="mb-3 text-xs font-medium">CLI agent</legend>
-                <div className="space-y-2">
-                  {Object.entries(agents).map(([id, item]) => (
-                    <label
-                      key={id}
-                      className={`relative flex cursor-pointer items-center gap-3 rounded-lg border p-3 has-focus-visible:ring-2 has-focus-visible:ring-primary ${agent === id ? "border-primary/50 bg-primary/5" : "border-border hover:bg-white/[0.02]"}`}
-                    >
-                      <input
-                        className="sr-only"
-                        type="radio"
-                        name="agent"
-                        value={id}
-                        checked={agent === id}
-                        onChange={() => {
-                          setAgent(id as AgentId);
-                          setResult(null);
-                        }}
-                      />
-                      <Command
-                        className={`size-4 ${agent === id ? "text-primary" : "text-muted-foreground"}`}
-                      />
-                      <div className="flex-1">
-                        <div className="text-xs font-medium">{item.name}</div>
-                        <div className="mt-0.5 text-[10px] text-muted-foreground">
-                          {item.description}
-                        </div>
-                      </div>
-                      {agent === id && (
-                        <Check className="size-3.5 text-primary" />
-                      )}
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
-              <div className="flex items-center justify-between rounded-md border border-dashed px-3 py-2.5 text-xs text-muted-foreground">
-                <span>Native entrypoint</span>
-                <code className="text-foreground">{agents[agent].command}</code>
-              </div>
-              <div className="space-y-3">
-                <Button
-                  type="submit"
-                  className="h-10 w-full"
-                  disabled={pending}
-                >
-                  {pending ? "Checking…" : "Check configuration"}
-                  <ArrowRight className="size-4" />
-                </Button>
-                <p className="text-center text-[10px] text-muted-foreground">
-                  No provisioning, API usage or charges.
-                </p>
-              </div>
-              {result && (
-                <p
-                  role={result.ok ? "status" : "alert"}
-                  className={`text-xs leading-5 ${result.ok ? "text-emerald-300" : "text-red-300"}`}
-                >
-                  {result.message}
-                </p>
-              )}
-            </form>
-          </section>
-
-          <section
-            className="flex min-w-0 flex-col"
-            aria-labelledby="terminal-heading"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4">
-              <h2
-                id="terminal-heading"
-                className="flex items-center gap-2 text-xs font-medium"
+          ) : !session.configured ? (
+            <>
+              <h2 className="font-normal">installation setup required</h2>
+              <p className="mt-3 leading-6 text-muted-foreground">
+                Configure D1, a GitHub OAuth app, the authentication secret and
+                allowed GitHub IDs before signing in.
+              </p>
+              <p className="mt-3 leading-6 text-muted-foreground">
+                See the self-hosting instructions in the repository README.
+                Credentials belong in Worker secrets or your local .dev.vars,
+                never here.
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 className="font-normal">sign in to your workspace</h2>
+              <p className="mt-3 leading-6 text-muted-foreground">
+                Use an account allowed by this installation. Repository access
+                and agent credentials are separate from sign-in.
+              </p>
+              <Button
+                variant="outline"
+                className="mt-5 rounded-none text-xs font-normal"
+                disabled={pending}
+                onClick={signIn}
               >
-                <SquareTerminal className="size-4 text-primary" />
-                Terminal
-              </h2>
-              <span className="font-mono text-[10px] text-muted-foreground">
-                ghostty-web / renderer preview
-              </span>
-            </div>
-            <TerminalPreview />
-          </section>
-        </div>
+                {pending ? "connecting…" : "continue with GitHub"}
+              </Button>
+            </>
+          )}
+        </main>
+      )}
+    </div>
+  );
+}
 
-        <div className="mt-6 grid gap-5 text-xs text-muted-foreground sm:grid-cols-3">
-          <p className="flex gap-2.5 leading-5">
-            <SquareTerminal className="mt-0.5 size-4 shrink-0" />
-            <span>
-              <strong className="font-medium text-foreground">
-                Native CLI experience
-              </strong>
-              <br />
-              The agent owns the conversation.
-            </span>
+function SavedWorkspace() {
+  const [data, setData] = useState<WorkspaceData | null>(null);
+  const [selected, setSelected] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    void apiRequest<WorkspaceData>("/workspace")
+      .then((result) => {
+        if (!cancelled) setData(result);
+      })
+      .catch((error: Error) => {
+        if (!cancelled) setError(error.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function savedProject(project: Project) {
+    setData(
+      (current) =>
+        current && {
+          ...current,
+          projects: current.projects.some((p) => p.id === project.id)
+            ? current.projects.map((p) => (p.id === project.id ? project : p))
+            : [...current.projects, project],
+        },
+    );
+    setSelected(project.id);
+  }
+  function savedThread(thread: Thread) {
+    setData(
+      (current) =>
+        current && {
+          ...current,
+          threads: current.threads.some((t) => t.id === thread.id)
+            ? current.threads.map((t) => (t.id === thread.id ? thread : t))
+            : [...current.threads, thread],
+        },
+    );
+  }
+  if (error)
+    return (
+      <main className="p-6 text-xs">
+        <p role="alert" className="text-destructive">
+          {error}
+        </p>
+        <Button
+          variant="outline"
+          className="mt-4 rounded-none text-xs"
+          onClick={() => window.location.reload()}
+        >
+          reload
+        </Button>
+      </main>
+    );
+  if (!data)
+    return (
+      <p role="status" className="p-6 text-xs text-muted-foreground">
+        loading projects…
+      </p>
+    );
+  const active =
+    data.projects.find((p) => p.id === selected)?.id ??
+    data.projects[0]?.id ??
+    "";
+  return (
+    <Tabs
+      value={active}
+      onValueChange={(value) => setSelected(String(value))}
+      className="work-tabs flex-1 gap-0"
+    >
+      <div className="flex min-w-0 items-center border-b">
+        {data.projects.length > 0 && (
+          <TabsList
+            variant="line"
+            aria-label="Projects"
+            className="min-w-0 justify-start overflow-x-auto"
+          >
+            {data.projects.map((project) => (
+              <TabsTrigger key={project.id} value={project.id}>
+                {project.name}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        )}
+        <div className="mx-2">
+          <ProjectSettings onSave={savedProject} />
+        </div>
+      </div>
+      {data.projects.length === 0 && (
+        <main className="p-6 text-xs">
+          <h2 className="font-normal">no projects yet</h2>
+          <p className="mt-2 text-muted-foreground">
+            Add a repository using + project. Your projects are private to your
+            account.
           </p>
-          <p className="flex gap-2.5 leading-5">
-            <Box className="mt-0.5 size-4 shrink-0" />
-            <span>
-              <strong className="font-medium text-foreground">
-                Isolated workspace
-              </strong>
-              <br />
-              Cloudflare provisioning is next.
-            </span>
+        </main>
+      )}
+      {data.projects.map((project) => (
+        <TabsContent
+          key={project.id}
+          value={project.id}
+          keepMounted
+          className="flex min-h-0 flex-col data-[hidden]:hidden"
+        >
+          <ProjectWorkspace
+            project={project}
+            active={active === project.id}
+            threads={data.threads.filter((t) => t.projectId === project.id)}
+            onProjectSave={savedProject}
+            onThreadSave={savedThread}
+          />
+        </TabsContent>
+      ))}
+    </Tabs>
+  );
+}
+
+function ProjectWorkspace({
+  project,
+  active,
+  threads,
+  onProjectSave,
+  onThreadSave,
+}: {
+  project: Project;
+  active: boolean;
+  threads: Thread[];
+  onProjectSave: (project: Project) => void;
+  onThreadSave: (thread: Thread) => void;
+}) {
+  const [selected, setSelected] = useState("");
+  const [inspector, setInspector] = useState("files");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const thread = threads.find((item) => item.id === selected) ?? threads[0];
+
+  async function addThread() {
+    setPending(true);
+    setError("");
+    try {
+      const result = await apiRequest<Thread>(
+        `/projects/${project.id}/threads`,
+        "POST",
+        { name: `thread ${threads.length + 1}`, agent: "claude" },
+      );
+      onThreadSave(result);
+      setSelected(result.id);
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : "Unable to create thread.",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="grid min-w-0 flex-1 grid-cols-1 lg:grid-cols-[200px_minmax(0,1fr)_260px] xl:grid-cols-[220px_minmax(0,1fr)_280px]">
+      <aside
+        className="flex min-w-0 flex-col border-b lg:border-r lg:border-b-0"
+        aria-label={`${project.name} threads`}
+      >
+        <div className="flex h-10 items-center justify-between border-b px-4">
+          <h2 className="text-xs font-normal">threads</h2>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="rounded-none"
+            aria-label="New thread"
+            disabled={pending}
+            onClick={addThread}
+          >
+            <Plus className="size-3.5" />
+          </Button>
+        </div>
+        <nav
+          aria-label="Threads"
+          className="flex gap-1 overflow-x-auto p-2 lg:flex-col"
+        >
+          {threads.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              aria-current={item.id === thread?.id ? "true" : undefined}
+              onClick={() => setSelected(item.id)}
+              className={`min-w-32 border-l-2 px-3 py-2 text-left text-xs outline-offset-2 focus-visible:outline-primary lg:min-w-0 ${item.id === thread?.id ? "border-primary bg-[var(--terminal)]" : "border-transparent text-muted-foreground hover:bg-[var(--terminal)]"}`}
+            >
+              <span className="block truncate">{item.name}</span>
+              <span className="mt-1 block text-[10px] text-muted-foreground">
+                {agents[item.agent].name} · not started
+              </span>
+            </button>
+          ))}
+        </nav>
+        {error && (
+          <p role="alert" className="px-4 py-2 text-[11px] text-destructive">
+            {error}
           </p>
-          <p className="flex gap-2.5 leading-5">
-            <GitBranch className="mt-0.5 size-4 shrink-0" />
-            <span>
-              <strong className="font-medium text-foreground">
-                Review before publishing
-              </strong>
-              <br />
-              Git integration is not connected.
-            </span>
+        )}
+        <div className="mt-auto border-t p-3">
+          <ProjectSettings project={project} onSave={onProjectSave} />
+          <p
+            className="mt-2 truncate text-[10px] leading-4 text-muted-foreground"
+            title={project.repository}
+          >
+            {project.repository.replace("https://github.com/", "")}
           </p>
         </div>
+      </aside>
+      <main
+        className="flex min-h-[400px] min-w-0 flex-col"
+        aria-label="Thread terminal"
+      >
+        {thread ? (
+          <>
+            <ThreadControls
+              key={`${thread.id}:${thread.version}`}
+              thread={thread}
+              onSave={onThreadSave}
+            />
+            {active && <TerminalPreview key={thread.id} />}
+          </>
+        ) : (
+          <div className="flex-1 bg-[var(--terminal)] p-6 text-xs">
+            <h2 className="font-normal">no threads yet</h2>
+            <p className="mt-2 text-muted-foreground">
+              Create a thread to choose a CLI agent.
+            </p>
+          </div>
+        )}
       </main>
-      <footer className="flex justify-between border-t px-5 py-4 font-mono text-[10px] text-muted-foreground md:px-9">
-        <span>AGENTFLARE / FOUNDATION</span>
-        <span>Nothing running. Nothing pushed.</span>
-      </footer>
+      <aside
+        className="flex min-w-0 flex-col border-t lg:border-t-0 lg:border-l"
+        aria-label="Thread files and Git stage"
+      >
+        <Tabs
+          value={inspector}
+          onValueChange={(value) => setInspector(String(value))}
+          className="min-h-48 flex-1 gap-0"
+        >
+          <TabsList
+            variant="line"
+            aria-label="Thread inspector"
+            className="w-full justify-start border-b"
+          >
+            <TabsTrigger value="files">files</TabsTrigger>
+            <TabsTrigger value="git">git stage</TabsTrigger>
+          </TabsList>
+          <TabsContent value="files" className="p-4">
+            <h2 className="text-xs font-normal">No filesystem mounted.</h2>
+            <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+              This thread has no connected sandbox.
+            </p>
+          </TabsContent>
+          <TabsContent value="git" className="p-4">
+            <h2 className="text-xs font-normal">No repository checked out.</h2>
+            <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+              Staged and unstaged changes will appear here once connected.
+            </p>
+          </TabsContent>
+        </Tabs>
+      </aside>
+    </div>
+  );
+}
+
+function ThreadControls({
+  thread,
+  onSave,
+}: {
+  thread: Thread;
+  onSave: (thread: Thread) => void;
+}) {
+  const [name, setName] = useState(thread.name);
+  const [agent, setAgent] = useState<AgentId>(thread.agent);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const dirty = name !== thread.name || agent !== thread.agent;
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setPending(true);
+    setError("");
+    try {
+      onSave(
+        await apiRequest<Thread>(`/threads/${thread.id}`, "PATCH", {
+          name,
+          agent,
+          version: thread.version,
+        }),
+      );
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : "Unable to save thread.",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+  return (
+    <div className="border-b">
+      <form
+        onSubmit={save}
+        className="flex min-h-10 flex-wrap items-center justify-between gap-2 px-3 py-1"
+      >
+        <div className="flex min-w-0 basis-full items-center gap-2 sm:flex-1 sm:basis-auto">
+          <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
+            terminal /
+          </span>
+          <Input
+            aria-label="Thread name"
+            value={name}
+            required
+            maxLength={60}
+            disabled={pending}
+            onChange={(event) => setName(event.target.value)}
+            className="workspace-input h-7! min-w-0 max-w-52 border-transparent px-1"
+          />
+        </div>
+        <select
+          aria-label="Thread agent"
+          value={agent}
+          disabled={pending}
+          onChange={(event) => setAgent(event.target.value as AgentId)}
+          className="h-7 max-w-full border bg-background px-2 text-xs outline-offset-2 focus-visible:outline-primary"
+        >
+          {Object.entries(agents).map(([key, item]) => (
+            <option key={key} value={key}>
+              {item.name}
+            </option>
+          ))}
+        </select>
+        {dirty && (
+          <Button
+            type="submit"
+            variant="outline"
+            disabled={pending}
+            className="h-7 rounded-none text-xs font-normal"
+          >
+            {pending ? "saving…" : "save thread"}
+          </Button>
+        )}
+      </form>
+      {error && (
+        <p role="alert" className="px-3 pb-2 text-[11px] text-destructive">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

@@ -1,0 +1,7 @@
+# Copy to .dev.vars (ignored). Never commit live values.
+BETTER_AUTH_URL=http://localhost:3000
+BETTER_AUTH_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+# Comma-separated numeric GitHub user IDs, not usernames. No wildcard access.
+ALLOWED_GITHUB_IDS=

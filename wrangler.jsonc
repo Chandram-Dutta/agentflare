@@ -5,5 +5,37 @@
   "compatibility_date": "2026-09-29",
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "not_found_handling": "none" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agentflare",
+      // Local-only placeholder. Replace with your own D1 ID before deployment.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "env": {
+    "production": {
+      "name": "agentflare-web",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [
+        { "pattern": "agentflare.onlychan.xyz", "custom_domain": true }
+      ],
+      "vars": {
+        "BETTER_AUTH_URL": "https://agentflare.onlychan.xyz",
+        "GITHUB_CLIENT_ID": "Iv23liBzGNYd1ZpDKH0e",
+        "ALLOWED_GITHUB_IDS": "81961406"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "agentflare",
+          "database_id": "6f9aeb28-b4e7-416c-ad86-785d5363ca05",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  },
   "observability": { "enabled": true }
 }

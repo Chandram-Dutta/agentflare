@@ -22,3 +22,33 @@ export const workspaceConfig = z.strictObject({
   repository,
   agent: z.enum(["claude", "codex"]),
 });
+
+export const projectInput = z.strictObject({
+  name: z.string().trim().min(1).max(40),
+  repository,
+});
+
+export const threadInput = z.strictObject({
+  name: z.string().trim().min(1).max(60),
+  agent: z.enum(["claude", "codex"]),
+});
+
+export const projectUpdate = projectInput.extend({
+  version: z.number().int().positive(),
+});
+export const threadUpdate = threadInput.extend({
+  version: z.number().int().positive(),
+});
+
+export type Project = z.infer<typeof projectInput> & {
+  id: string;
+  version: number;
+  createdAt: number;
+};
+export type Thread = z.infer<typeof threadInput> & {
+  id: string;
+  projectId: string;
+  version: number;
+  createdAt: number;
+};
+export type WorkspaceData = { projects: Project[]; threads: Thread[] };

@@ -1,100 +1,96 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useTheme } from "next-themes";
 import type { Terminal } from "ghostty-web";
 
 export function TerminalPreview() {
   const container = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState("Loading Ghostty renderer…");
+  const { resolvedTheme } = useTheme();
+  const [status, setStatus] = useState("loading terminal");
   const [dimensions, setDimensions] = useState("");
-  const [input, setInput] = useState(
-    "Click the terminal and type to test keyboard input.",
-  );
 
   useEffect(() => {
+    if (!resolvedTheme) return;
     let cancelled = false;
     let terminal: Terminal | undefined;
+    let observer: ResizeObserver | undefined;
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 
     async function open() {
       const { Ghostty, Terminal, FitAddon } = await import("ghostty-web");
       const ghostty = await Ghostty.load("/ghostty-vt.wasm");
       if (cancelled || !container.current) return;
+      const style = getComputedStyle(container.current);
       terminal = new Terminal({
         ghostty,
         fontSize: 13,
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontFamily:
+          "ui-monospace, SFMono-Regular, Consolas, Liberation Mono, monospace",
         cursorBlink: false,
         theme: {
-          background: "#151619",
-          foreground: "#c9ccd2",
-          cursor: "#ff9257",
-          brightBlack: "#9298a3",
+          background: style.getPropertyValue("--terminal").trim(),
+          foreground: style.getPropertyValue("--foreground").trim(),
+          cursor: style.getPropertyValue("--primary").trim(),
         },
       });
       const fit = new FitAddon();
+      const previousFocus = document.activeElement;
       terminal.loadAddon(fit);
       terminal.open(container.current);
-      const sample = [
-        "\x1b[38;2;255;146;87mAGENTFLARE\x1b[0m  /  terminal renderer preview",
-        "",
-        "Your agent's own UI belongs here.",
-        "No chat wrapper. No translated tool calls.",
-        "",
-        "\x1b[90m──────────────────────────────────────────────\x1b[0m",
-        "",
-        "\x1b[32m✓\x1b[0m Ghostty WASM loaded locally",
-        "\x1b[32m✓\x1b[0m ANSI colors and cursor control available",
-        "\x1b[33m○\x1b[0m Cloudflare sandbox not connected",
-        "\x1b[33m○\x1b[0m No CLI agent running",
-        "",
-        "\x1b[90mThis is sample output, not an agent session.\x1b[0m",
-        "\x1b[?25l",
-      ].join("\r\n");
-      // This preview has no PTY to redraw after SIGWINCH. Redraw its sample only;
-      // a live terminal must forward dimensions instead of replacing its output.
-      const redraw = () => terminal?.write(`\x1b[2J\x1b[H${sample}`);
-      terminal.onResize(({ cols, rows }) => {
-        setDimensions(`${cols} × ${rows}`);
-        redraw();
-      });
+      // Ghostty focuses its editable host on open. Do not steal focus from setup
+      // controls when loading WASM or switching themes.
+      if (
+        previousFocus instanceof HTMLElement &&
+        previousFocus !== document.body
+      ) {
+        previousFocus.focus({ preventScroll: true });
+      } else {
+        container.current.blur();
+      }
+      terminal.write("\x1b[?25l");
+      terminal.onResize(({ cols, rows }) => setDimensions(`${cols} × ${rows}`));
       fit.fit();
-      fit.observeResize();
+      // FitAddon.observeResize drops notifications during its 50ms resize lock.
+      // Queue every notification so a quick tab switch + resize isn't lost.
+      observer = new ResizeObserver(() => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => fit.fit(), 100);
+      });
+      observer.observe(container.current);
       setDimensions(`${terminal.cols} × ${terminal.rows}`);
-      terminal.onData((data) =>
-        setInput(
-          `Input received: ${JSON.stringify(data)} · not sent to a shell`,
-        ),
-      );
-      redraw();
-      setStatus("Renderer ready");
+      terminal.onData(() => setStatus("no session — input not sent"));
+      setStatus("no session");
     }
 
     void open().catch(() => {
       terminal?.dispose();
-      if (!cancelled) setStatus("Terminal failed to load. Reload to retry.");
+      if (!cancelled) setStatus("terminal unavailable — reload to retry");
     });
     return () => {
       cancelled = true;
+      observer?.disconnect();
+      clearTimeout(resizeTimer);
       terminal?.dispose();
     };
-  }, []);
+  }, [resolvedTheme]);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
-      <div
-        className="min-h-80 flex-1 overflow-hidden p-5"
-        aria-label="Ghostty terminal renderer preview"
-      >
-        <div ref={container} className="h-[390px] w-full overflow-hidden" />
+    <>
+      <div className="relative flex min-h-[320px] flex-1 flex-col bg-[var(--terminal)] p-4 sm:p-6">
+        <p className="pointer-events-none absolute top-5 left-4 z-10 text-xs text-muted-foreground sm:left-6">
+          No workspace connected.
+        </p>
+        <div
+          ref={container}
+          data-terminal-host
+          className="absolute inset-4 overflow-hidden caret-transparent outline-none sm:inset-6"
+        />
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t px-5 py-3 font-mono text-[11px] text-muted-foreground">
-        <span role="status">
-          {status} {dimensions && `· ${dimensions}`}
-        </span>
-        <span className="max-w-full break-all" aria-live="polite">
-          {input}
-        </span>
-      </div>
-    </div>
+      <footer className="flex min-h-9 flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-[11px] text-muted-foreground sm:px-6">
+        <span role="status">{status}</span>
+        <span data-terminal-size>{dimensions}</span>
+      </footer>
+    </>
   );
 }
