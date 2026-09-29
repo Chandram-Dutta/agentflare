@@ -46,7 +46,7 @@ next-env.d.ts
 /dist/
 /.vinext/
 /.cloudflare/
-/.wrangler/
+.wrangler/
 /.amp/portals/
 /.amp/in/
 /public/ghostty-vt.wasm

@@ -5,3 +5,6 @@ GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 # Comma-separated numeric GitHub user IDs, not usernames. No wildcard access.
 ALLOWED_GITHUB_IDS=
+# GitHub App repository access. Keep the multiline PEM quoted or upload as a Worker secret.
+GITHUB_APP_ID=
+GITHUB_APP_PRIVATE_KEY=

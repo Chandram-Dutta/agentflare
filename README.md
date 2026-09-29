@@ -5,7 +5,7 @@ agent's native terminal UI instead of a platform-specific chat wrapper.
 
 ## Current milestone
 
-A persistent, authenticated workspace, **not a hosted agent runner yet**:
+A persistent, authenticated workspace with an initial Cloudflare Sandbox runtime:
 
 - Next.js App Router structure on vinext/Vite and Cloudflare Workers.
 - TypeScript, Bun, Tailwind, shadcn/ui, and Hono.
@@ -15,13 +15,23 @@ A persistent, authenticated workspace, **not a hosted agent runner yet**:
 - Monospace light/dark workspace with a Ghostty terminal renderer.
 - Server-side ownership checks, exact-origin write protection and stale-edit detection.
 
-The views show disconnected states, not fabricated files or agent output. No agent
-is installed in a sandbox, no shell is connected, and agent credentials are not
-collected yet. Repository URLs are validated, not cloned or checked for access.
+Each started thread checks user and GitHub App repository access, clones into its
+own sandbox/branch, and opens Claude Code or Codex in a native PTY. Ghostty carries
+binary WebSocket input/output and resize messages. Reconnecting attaches to the
+same live agent. Files and Git stage use Pierre Trees/Diffs with actual repository
+data; use refresh after agent edits. Stage and commit through the CLI.
+
+**Experimental: sandbox disk and agent login state are ephemeral.** After 30 minutes
+idle or a container restart they can be lost; saved thread metadata is not a backup.
+No R2 checkpoints or publish operation yet. Clone credentials are short-lived and
+read-only, not left in Git configuration. Native `git push` requires your own
+repository credentials until controlled publishing is implemented. Do not entrust
+unexported work to this initial runtime. Authenticate the agent through its native
+CLI; browser-local OAuth callbacks may require its remote/device login option.
 
 ## Development
 
-Use Bun 1.3.10 and Node 22.12+ (Vite's Node runtime). Install and run:
+Use Bun 1.3.10, Node 22.12+ (Vite's Node runtime), Docker Engine and Buildx. Install and run:
 
 ```sh
 bun install --frozen-lockfile
@@ -49,7 +59,11 @@ generated binary. Keep vinext pinned while evaluating its compatibility.
 There is no central Agentflare service, shared database or built-in account key.
 Each installation owns its Worker, D1 database, OAuth app and secrets. This currently
 means self-deployable **on Cloudflare**, not a Docker-only/non-Cloudflare distribution.
-Sandbox execution and its billable resources are not enabled yet.
+Sandbox execution requires a paid Cloudflare account with Containers enabled.
+Review `instance_type` and `max_instances` in Wrangler before deploying; the current
+limit is five containers per installation, not five per user. Containers incur
+charges while running. Only allow trusted users: the CLI can execute arbitrary code
+and access the network inside its sandbox.
 
 ### Configure identity
 
@@ -59,15 +73,18 @@ Sandbox execution and its billable resources are not enabled yet.
 2. Register your own [GitHub App](https://github.com/settings/apps/new).
    Set the homepage to that origin and the callback to
    `<origin>/api/auth/callback/github`. Grant Email addresses: Read-only for sign-in.
-   For future repository publishing, grant Contents and Pull requests: Read & write,
-   and install on selected repositories. Leave OAuth-during-installation and webhooks
-   disabled until the repository connection is implemented. Use a separate app for local testing.
+   Grant Contents and Pull requests: Read & write, and install on selected
+   repositories. The current clone token explicitly narrows Contents to Read-only.
+   Leave OAuth-during-installation and webhooks disabled. Use a separate app for local testing.
 3. Copy `.dev.vars.example` to `.dev.vars` for local development, then fill:
    - `BETTER_AUTH_URL`: the canonical origin.
    - `BETTER_AUTH_SECRET`: at least 32 random characters; generate with
      `openssl rand -base64 32`. Keep it backed up securely: OAuth tokens are encrypted
      with it. Changing it invalidates sessions and requires OAuth reauthentication.
    - `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`: your GitHub App credentials.
+   - `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`: the App's numeric ID and PEM
+     private key. Store the PEM in a Worker secret, never source control or a
+     container image. `.dockerignore` excludes credentials from the image context.
    - `ALLOWED_GITHUB_IDS`: comma-separated **numeric GitHub account IDs**, not
      usernames. Find your ID with `gh api user --jq .id`. No wildcard or open signup.
 4. Run `bun run db:migrate:local`, start the app, and sign in. Until configured,
@@ -77,8 +94,9 @@ The allowlist is checked at OAuth admission and on every private API request.
 Removing an ID blocks its existing sessions too. GitHub App user tokens are governed
 by the app's granted permissions, not OAuth scopes; they are encrypted server-side
 and must never be handed to a sandbox. The browser cannot choose sign-in options
-or retrieve stored OAuth tokens. GitHub App installation authorization is a separate,
-not-yet-implemented integration; login alone never grants clone or push access.
+or retrieve stored OAuth tokens. Starting a thread verifies the signed-in user's
+access first, then the App's installation, then mints a token for only that repository.
+The App private key and user OAuth token never enter the sandbox.
 
 ### Deploy when ready
 
@@ -88,9 +106,10 @@ resources, apply remote migrations and deploy to your account:
 1. Authenticate Wrangler to your Cloudflare account.
 2. Create your own database with `bunx wrangler d1 create agentflare`. Put the
    returned database ID in `wrangler.jsonc`, replacing the local-only zero UUID.
-3. Configure `BETTER_AUTH_URL`, `GITHUB_CLIENT_ID` and `ALLOWED_GITHUB_IDS` as Worker
+3. Configure `BETTER_AUTH_URL`, `GITHUB_CLIENT_ID`, `GITHUB_APP_ID` and `ALLOWED_GITHUB_IDS` as Worker
    variables in your Wrangler config. Store `BETTER_AUTH_SECRET` and
    `GITHUB_CLIENT_SECRET` with `bunx wrangler secret put <NAME>`; never in Git.
+   Upload the PEM using `bunx wrangler secret put GITHUB_APP_PRIVATE_KEY < /secure/path/app.pem`.
 4. Review `migrations/`, back up existing data, then run
    `bunx wrangler d1 migrations apply DB --remote` on the intended account/database.
 5. Run `bun run build` and `bunx wrangler deploy --config dist/server/wrangler.json`.
@@ -107,7 +126,7 @@ bun run build:production
 bunx wrangler deploy --config dist/server/wrangler.json
 ```
 
-Upload `BETTER_AUTH_SECRET` and `GITHUB_CLIENT_SECRET` as Worker secrets for that
+Upload `BETTER_AUTH_SECRET`, `GITHUB_CLIENT_SECRET` and `GITHUB_APP_PRIVATE_KEY` as Worker secrets for that
 environment. A first deployment can supply an owner-only secrets file with
 Wrangler's `--secrets-file` option; delete it after uploading. Subsequent deployments
 preserve Worker secrets. Never regenerate `BETTER_AUTH_SECRET` on each deploy.
@@ -119,32 +138,44 @@ schema changes and review generated SQL; never use schema push against productio
 Tests create disposable local D1 databases and synthetic sessions. They never call
 GitHub, provision Cloudflare resources or add a development authentication bypass.
 
-## Next implementation boundary
+## Runtime checks and remaining work
 
 The application owns identity, repository access, credentials, provisioning,
 terminal transport, checkpoints and code review. The CLI owns its conversation,
 tools, menus and permission prompts. No output parsing is needed to show its UI.
 
-The repository UI will use [`@pierre/trees`](https://trees.software/docs) for file
+The repository UI uses [`@pierre/trees`](https://trees.software/docs) for file
 navigation and [`@pierre/diffs`](https://diffs.com/docs) for file/diff rendering.
 Both declare Apache-2.0 licensing and React 19 support; Trees is currently beta.
-Install and pin them when real repository data is available, not to render fake
-files in disconnected panes. [`DiffsHub`](https://diffshub.com) is a reference UI,
+[`DiffsHub`](https://diffshub.com) is a reference UI,
 not an embedded service or a destination for users' code/credentials. Git stage
 must distinguish working-tree ↔ index from index ↔ HEAD; these libraries do not
 perform stage/unstage operations or provide filesystem authorization.
 
-1. GitHub App with selected-repository access. Sign-in, sessions and D1 project/thread
-   persistence are implemented; real OAuth callback validation still needs operator credentials.
-2. One Cloudflare Sandbox per thread/branch; a Durable Object coordinates
-   lifecycle. Versioned images preinstall supported CLIs. Start their interactive
-   entrypoint in a PTY, not a headless prompt execution mode.
-3. Authenticated WebSocket transport for binary PTY input/output and resize
-   messages. A browser disconnect must not kill the agent. Reconnect attaches to
-   the same live PTY; a lost container requires restoration and a new process.
-4. Encrypted bring-your-own credentials, repository-scoped short-lived GitHub
-   tokens, and R2 checkpoints excluding credentials and dependency directories.
-5. Git diff review and controlled publishing. Runtime and concurrency budgets.
+`bun test` uses disposable repositories and D1 databases to check ownership, origins,
+path/symlink escapes, literal Git pathspecs, renames, and index versus working-tree
+diffs. GitHub token tests mock GitHub, verify the App signature, and ensure user
+access denial stops before using App authority.
+
+For a Docker-backed runtime smoke check, run this **local-only** fixture (never
+deploy it):
+
+```sh
+bunx wrangler dev --config scripts/runtime-smoke/wrangler.jsonc --port 3900
+curl http://localhost:3900/prepare
+```
+
+It clones a synthetic local repository and issues concurrent starts against one
+Durable Object. `/terminal` upgrades to the native Codex PTY, `/pid` reports its
+process, and `/destroy` removes this disposable sandbox. No GitHub/agent tokens
+are needed. Run only one dev server on memory-constrained machines. Some nested
+sandboxes lack the kernel socket/TPROXY modules required by Wrangler's network
+proxy: Docker builds and ordinary containers can work while the full local
+Containers runtime cannot. In that case the deployment must be smoke-tested on
+Cloudflare; do not treat unit tests as proof of the live PTY path.
+
+Still needed: R2 checkpoints and restore, encrypted reusable agent credentials,
+controlled publishing, agent restart/stop UX, and per-user runtime budgets.
 
 **Publishing must be enforced at the credential boundary.** A confirmation button
 cannot prevent a native CLI from running `git push` if its sandbox already holds
@@ -154,6 +185,6 @@ separate, authorized publishing operation. Agent permission prompts remain nativ
 Sandbox disk is ephemeral. Checkpoint files and supported agent session state;
 never promise process-memory recovery or preservation beyond the last checkpoint.
 Do not expose terminal, preview, clone or execution endpoints until their resource
-authorization is enforced. R2 and Sandbox integrations are not implemented yet.
+authorization is enforced. R2 restoration is not implemented yet.
 Local and production D1 bindings are separate. No deployment command runs during
 setup/tests.

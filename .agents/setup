@@ -7,6 +7,11 @@ export PATH="$HOME/.bun/bin:$PATH"
 if ! command -v bun >/dev/null || [[ "$(bun --version)" != "$bun_version" ]]; then
   curl -fsSL https://bun.com/install | bash -s "bun-v$bun_version"
 fi
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "Installing Docker Buildx for Cloudflare container development"
+  sudo apt-get update -qq
+  sudo apt-get install -y docker-buildx-plugin
+fi
 echo "Installing locked dependencies and preparing Ghostty WASM"
 time bun install --frozen-lockfile
 echo "Ready. Start the development portal with: amp orb services ensure"

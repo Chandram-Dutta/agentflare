@@ -1,10 +1,22 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "agentflare-web",
-  "main": "vinext/server/fetch-handler",
+  "main": "src/worker.ts",
   "compatibility_date": "2026-09-29",
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "not_found_handling": "none" },
+  "containers": [
+    {
+      "class_name": "ThreadSandbox",
+      "image": "./Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 5
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "Sandboxes", "class_name": "ThreadSandbox" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ThreadSandbox"] }],
   "d1_databases": [
     {
       "binding": "DB",
@@ -19,12 +31,24 @@
       "name": "agentflare-web",
       "workers_dev": false,
       "preview_urls": false,
+      "containers": [
+        {
+          "class_name": "ThreadSandbox",
+          "image": "./Dockerfile",
+          "instance_type": "standard-1",
+          "max_instances": 5
+        }
+      ],
+      "durable_objects": {
+        "bindings": [{ "name": "Sandboxes", "class_name": "ThreadSandbox" }]
+      },
       "routes": [
         { "pattern": "agentflare.onlychan.xyz", "custom_domain": true }
       ],
       "vars": {
         "BETTER_AUTH_URL": "https://agentflare.onlychan.xyz",
         "GITHUB_CLIENT_ID": "Iv23liBzGNYd1ZpDKH0e",
+        "GITHUB_APP_ID": "5124431",
         "ALLOWED_GITHUB_IDS": "81961406"
       },
       "d1_databases": [

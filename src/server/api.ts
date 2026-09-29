@@ -16,6 +16,9 @@ import { createAuth } from "./auth";
 import { allowedGitHubIds, installationReady, type Bindings } from "./env";
 import { account } from "./db/auth-schema";
 import { project, thread } from "./db/workspace-schema";
+import { repositoryCloneToken } from "./github";
+import { repositoryPath } from "@/lib/runtime";
+import type { ThreadSandbox } from "./sandbox";
 
 export const api = new Hono<{
   Bindings: Bindings;
@@ -31,7 +34,8 @@ api.use("*", async (c, next) => {
 });
 
 api.onError((error, c) => {
-  if (error instanceof HTTPException) return error.getResponse();
+  if (error instanceof HTTPException)
+    return c.json({ error: error.message }, error.status);
   return c.json(
     {
       error:
@@ -41,7 +45,12 @@ api.onError((error, c) => {
   );
 });
 
-api.get("/health", (c) => c.json({ status: "ok", execution: "not-connected" }));
+api.get("/health", (c) =>
+  c.json({
+    status: "ok",
+    execution: c.env?.Sandboxes ? "sandbox-configured" : "not-configured",
+  }),
+);
 
 // Public, side-effect-free format validation. Does not fetch, clone or execute.
 // Authentication and repository authorization must precede any future launch API.
@@ -295,7 +304,7 @@ api.patch("/threads/:id", async (c) => {
   if (!input.success) return c.json({ error: "Invalid thread update." }, 400);
   const db = c.get("db");
   const owned = await db
-    .select({ id: thread.id })
+    .select({ id: thread.id, agent: thread.agent })
     .from(thread)
     .innerJoin(project, eq(thread.projectId, project.id))
     .where(
@@ -306,6 +315,18 @@ api.patch("/threads/:id", async (c) => {
     )
     .get();
   if (!owned) return c.notFound();
+  if (c.env.Sandboxes && input.data.agent !== owned.agent) {
+    const { getSandbox } = await import("@cloudflare/sandbox");
+    const state = await getSandbox<ThreadSandbox>(
+      c.env.Sandboxes,
+      owned.id,
+    ).workspaceStatus();
+    if (state.started)
+      return c.json(
+        { error: "Create a new thread to use a different agent." },
+        409,
+      );
+  }
   const result = await db
     .update(thread)
     .set({
@@ -322,4 +343,126 @@ api.patch("/threads/:id", async (c) => {
       409,
     );
   return c.json(result);
+});
+
+// Resolve ownership before obtaining a Durable Object or contacting GitHub.
+api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
+  const operation = c.req.param("operation");
+  const method = c.req.method;
+  if (
+    !(
+      method === "POST"
+        ? ["start"]
+        : ["status", "terminal", "files", "file", "git", "diff"]
+    ).includes(operation)
+  )
+    return c.notFound();
+  if (
+    operation === "terminal" &&
+    c.req.header("Origin") !== c.env.BETTER_AUTH_URL
+  )
+    return c.json({ error: "Origin is not allowed." }, 403);
+  const owned = await c
+    .get("db")
+    .select({
+      id: thread.id,
+      agent: thread.agent,
+      repository: project.repository,
+    })
+    .from(thread)
+    .innerJoin(project, eq(thread.projectId, project.id))
+    .where(
+      and(
+        eq(thread.id, c.req.param("id")),
+        eq(project.ownerId, c.get("user").id),
+      ),
+    )
+    .get();
+  if (!owned) return c.notFound();
+  let path = "";
+  if (["file", "diff"].includes(operation)) {
+    try {
+      path = repositoryPath(c.req.query("path") ?? "");
+    } catch {
+      return c.json({ error: "Invalid repository path." }, 400);
+    }
+  }
+  if (!c.env.Sandboxes)
+    return c.json(
+      { error: "The operator must configure Cloudflare Containers." },
+      503,
+    );
+  const { getSandbox } = await import("@cloudflare/sandbox");
+  const sandbox = getSandbox<ThreadSandbox>(c.env.Sandboxes, owned.id);
+  if (operation === "status") return c.json(await sandbox.workspaceStatus());
+  if (operation === "start") {
+    const identity = await c
+      .get("db")
+      .select({ id: account.id })
+      .from(account)
+      .where(
+        and(
+          eq(account.userId, c.get("user").id),
+          eq(account.providerId, "github"),
+        ),
+      )
+      .get();
+    if (!identity)
+      return c.json({ error: "Reconnect your GitHub account." }, 403);
+    const token = await createAuth(c.env).api.getAccessToken({
+      headers: c.req.raw.headers,
+      body: { accountId: identity.id },
+    });
+    const cloneToken = await repositoryCloneToken(
+      c.env,
+      owned.repository,
+      token.accessToken,
+    );
+    try {
+      return c.json(
+        await sandbox.startWorkspace({
+          repository: owned.repository,
+          agent: owned.agent,
+          name: c.get("user").name,
+          branch: `agentflare/${owned.id}`,
+          cloneToken,
+        }),
+      );
+    } catch {
+      return c.json(
+        {
+          error:
+            "Sandbox could not start. Check container availability and repository access. If this thread lost its sandbox or has a partial checkout, create a new thread.",
+        },
+        502,
+      );
+    }
+  }
+  if (operation === "terminal") {
+    if (c.req.header("Upgrade")?.toLowerCase() !== "websocket")
+      return c.json({ error: "WebSocket upgrade required." }, 426);
+    const size = z.coerce.number().int().min(2).max(500);
+    const cols = size.safeParse(c.req.query("cols") ?? 80);
+    const rows = size.safeParse(c.req.query("rows") ?? 24);
+    if (!cols.success || !rows.success)
+      return c.json({ error: "Invalid terminal size." }, 400);
+    return sandbox.connectWorkspace(c.req.raw, cols.data, rows.data);
+  }
+  try {
+    return c.json(
+      await sandbox.inspectWorkspace(
+        operation,
+        path,
+        c.req.query("staged") === "true",
+      ),
+    );
+  } catch {
+    return c.json(
+      {
+        error:
+          "Cannot read this workspace. It may be stopped, or the file may be missing, binary or too large.",
+      },
+      409,
+    );
+  }
 });

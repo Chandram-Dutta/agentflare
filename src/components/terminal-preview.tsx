@@ -4,11 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import type { Terminal } from "ghostty-web";
 
-export function TerminalPreview() {
+export function TerminalPreview({ threadId }: { threadId: string }) {
   const container = useRef<HTMLDivElement>(null);
   const { resolvedTheme } = useTheme();
   const [status, setStatus] = useState("loading terminal");
   const [dimensions, setDimensions] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!resolvedTheme) return;
@@ -16,6 +17,7 @@ export function TerminalPreview() {
     let terminal: Terminal | undefined;
     let observer: ResizeObserver | undefined;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    let socket: WebSocket | undefined;
 
     async function open() {
       const { Ghostty, Terminal, FitAddon } = await import("ghostty-web");
@@ -48,8 +50,11 @@ export function TerminalPreview() {
       } else {
         container.current.blur();
       }
-      terminal.write("\x1b[?25l");
-      terminal.onResize(({ cols, rows }) => setDimensions(`${cols} × ${rows}`));
+      terminal.onResize(({ cols, rows }) => {
+        setDimensions(`${cols} × ${rows}`);
+        if (socket?.readyState === WebSocket.OPEN)
+          socket.send(JSON.stringify({ type: "resize", cols, rows }));
+      });
       fit.fit();
       // FitAddon.observeResize drops notifications during its 50ms resize lock.
       // Queue every notification so a quick tab switch + resize isn't lost.
@@ -59,8 +64,41 @@ export function TerminalPreview() {
       });
       observer.observe(container.current);
       setDimensions(`${terminal.cols} × ${terminal.rows}`);
-      terminal.onData(() => setStatus("no session — input not sent"));
-      setStatus("no session");
+      const url = new URL(
+        `/api/threads/${threadId}/runtime/terminal`,
+        window.location.href,
+      );
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("cols", String(terminal.cols));
+      url.searchParams.set("rows", String(terminal.rows));
+      socket = new WebSocket(url);
+      socket.binaryType = "arraybuffer";
+      setStatus("connecting…");
+      const encoder = new TextEncoder();
+      terminal.onData((data) => {
+        if (socket?.readyState === WebSocket.OPEN)
+          socket.send(encoder.encode(data));
+      });
+      socket.onmessage = (event) => {
+        if (cancelled) return;
+        if (event.data instanceof ArrayBuffer)
+          terminal?.write(new Uint8Array(event.data));
+        else {
+          const message = JSON.parse(event.data);
+          if (message.type === "ready") setStatus("connected");
+          if (message.type === "exit")
+            setStatus(`agent exited (${message.exitCode ?? "unknown"})`);
+          if (message.type === "error")
+            setStatus("terminal error — reconnect to retry");
+        }
+      };
+      socket.onclose = () => {
+        if (!cancelled) setStatus("disconnected — reconnect to retry");
+      };
+      socket.onerror = () => {
+        if (!cancelled)
+          setStatus("connection failed — check sandbox and sign-in");
+      };
     }
 
     void open().catch(() => {
@@ -71,16 +109,14 @@ export function TerminalPreview() {
       cancelled = true;
       observer?.disconnect();
       clearTimeout(resizeTimer);
+      socket?.close();
       terminal?.dispose();
     };
-  }, [resolvedTheme]);
+  }, [resolvedTheme, threadId, attempt]);
 
   return (
     <>
       <div className="relative flex min-h-[320px] flex-1 flex-col bg-[var(--terminal)] p-4 sm:p-6">
-        <p className="pointer-events-none absolute top-5 left-4 z-10 text-xs text-muted-foreground sm:left-6">
-          No workspace connected.
-        </p>
         <div
           ref={container}
           data-terminal-host
@@ -89,6 +125,13 @@ export function TerminalPreview() {
       </div>
       <footer className="flex min-h-9 flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-[11px] text-muted-foreground sm:px-6">
         <span role="status">{status}</span>
+        <button
+          type="button"
+          className="underline underline-offset-4"
+          onClick={() => setAttempt((value) => value + 1)}
+        >
+          reconnect
+        </button>
         <span data-terminal-size>{dimensions}</span>
       </footer>
     </>

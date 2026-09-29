@@ -1,6 +1,13 @@
-import type { D1Database } from "@cloudflare/workers-types";
+import type {
+  D1Database,
+  DurableObjectNamespace,
+} from "@cloudflare/workers-types";
+import type { ThreadSandbox } from "./sandbox";
 
 export type Bindings = {
+  Sandboxes?: DurableObjectNamespace<ThreadSandbox>;
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
   DB?: D1Database;
   BETTER_AUTH_URL?: string;
   BETTER_AUTH_SECRET?: string;

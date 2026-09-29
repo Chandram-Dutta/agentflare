@@ -6,7 +6,7 @@ import { Moon, Plus, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { TerminalPreview } from "@/components/terminal-preview";
+import { RuntimeWorkspace } from "@/components/runtime-workspace";
 import { ProjectSettings } from "@/components/project-settings";
 import { apiRequest } from "@/lib/api-client";
 import {
@@ -323,7 +323,6 @@ function ProjectWorkspace({
   onThreadSave: (thread: Thread) => void;
 }) {
   const [selected, setSelected] = useState("");
-  const [inspector, setInspector] = useState("files");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const thread = threads.find((item) => item.id === selected) ?? threads[0];
@@ -349,7 +348,7 @@ function ProjectWorkspace({
   }
 
   return (
-    <div className="grid min-w-0 flex-1 grid-cols-1 lg:grid-cols-[200px_minmax(0,1fr)_260px] xl:grid-cols-[220px_minmax(0,1fr)_280px]">
+    <div className="grid min-w-0 flex-1 grid-cols-1 lg:grid-cols-[200px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)]">
       <aside
         className="flex min-w-0 flex-col border-b lg:border-r lg:border-b-0"
         aria-label={`${project.name} threads`}
@@ -381,7 +380,7 @@ function ProjectWorkspace({
             >
               <span className="block truncate">{item.name}</span>
               <span className="mt-1 block text-[10px] text-muted-foreground">
-                {agents[item.agent].name} · not started
+                {agents[item.agent].name}
               </span>
             </button>
           ))}
@@ -401,59 +400,25 @@ function ProjectWorkspace({
           </p>
         </div>
       </aside>
-      <main
-        className="flex min-h-[400px] min-w-0 flex-col"
-        aria-label="Thread terminal"
-      >
-        {thread ? (
-          <>
+      {thread && active ? (
+        <RuntimeWorkspace key={thread.id} threadId={thread.id}>
+          {(started) => (
             <ThreadControls
               key={`${thread.id}:${thread.version}`}
               thread={thread}
               onSave={onThreadSave}
+              started={started}
             />
-            {active && <TerminalPreview key={thread.id} />}
-          </>
-        ) : (
-          <div className="flex-1 bg-[var(--terminal)] p-6 text-xs">
-            <h2 className="font-normal">no threads yet</h2>
-            <p className="mt-2 text-muted-foreground">
-              Create a thread to choose a CLI agent.
-            </p>
-          </div>
-        )}
-      </main>
-      <aside
-        className="flex min-w-0 flex-col border-t lg:border-t-0 lg:border-l"
-        aria-label="Thread files and Git stage"
-      >
-        <Tabs
-          value={inspector}
-          onValueChange={(value) => setInspector(String(value))}
-          className="min-h-48 flex-1 gap-0"
-        >
-          <TabsList
-            variant="line"
-            aria-label="Thread inspector"
-            className="w-full justify-start border-b"
-          >
-            <TabsTrigger value="files">files</TabsTrigger>
-            <TabsTrigger value="git">git stage</TabsTrigger>
-          </TabsList>
-          <TabsContent value="files" className="p-4">
-            <h2 className="text-xs font-normal">No filesystem mounted.</h2>
-            <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
-              This thread has no connected sandbox.
-            </p>
-          </TabsContent>
-          <TabsContent value="git" className="p-4">
-            <h2 className="text-xs font-normal">No repository checked out.</h2>
-            <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
-              Staged and unstaged changes will appear here once connected.
-            </p>
-          </TabsContent>
-        </Tabs>
-      </aside>
+          )}
+        </RuntimeWorkspace>
+      ) : (
+        <div className="flex-1 bg-[var(--terminal)] p-6 text-xs">
+          <h2 className="font-normal">no threads yet</h2>
+          <p className="mt-2 text-muted-foreground">
+            Create a thread to choose a CLI agent.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -461,9 +426,11 @@ function ProjectWorkspace({
 function ThreadControls({
   thread,
   onSave,
+  started,
 }: {
   thread: Thread;
   onSave: (thread: Thread) => void;
+  started: boolean;
 }) {
   const [name, setName] = useState(thread.name);
   const [agent, setAgent] = useState<AgentId>(thread.agent);
@@ -513,7 +480,7 @@ function ThreadControls({
         <select
           aria-label="Thread agent"
           value={agent}
-          disabled={pending}
+          disabled={pending || started}
           onChange={(event) => setAgent(event.target.value as AgentId)}
           className="h-7 max-w-full border bg-background px-2 text-xs outline-offset-2 focus-visible:outline-primary"
         >

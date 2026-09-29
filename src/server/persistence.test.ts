@@ -113,6 +113,60 @@ afterAll(async () => {
   await mf?.dispose();
 });
 
+test("runtime endpoints enforce thread ownership and WebSocket origin before accessing a sandbox", async () => {
+  const created = (await (
+    await request("/projects", "POST", {
+      name: "repo",
+      repository: "https://github.com/acme/repo",
+    })
+  ).json()) as Project;
+  const thread = (await (
+    await request(`/projects/${created.id}/threads`, "POST", {
+      name: "task",
+      agent: "claude",
+    })
+  ).json()) as Thread;
+  for (const operation of [
+    "status",
+    "terminal",
+    "files",
+    "git",
+    "file?path=README.md",
+    "diff?path=README.md",
+    "start",
+  ]) {
+    const method = operation === "start" ? "POST" : "GET";
+    expect(
+      (
+        await request(
+          `/threads/${thread.id}/runtime/${operation}`,
+          method,
+          undefined,
+          "bob",
+        )
+      ).status,
+    ).toBe(404);
+  }
+  expect(
+    (
+      await request(
+        `/threads/${thread.id}/runtime/terminal`,
+        "GET",
+        undefined,
+        "alice",
+        { origin: "https://evil.test" },
+      )
+    ).status,
+  ).toBe(403);
+  expect(
+    (await request(`/threads/${thread.id}/runtime/file?path=..%2Fsecret`))
+      .status,
+  ).toBe(400);
+  expect((await request(`/threads/${thread.id}/runtime/status`)).status).toBe(
+    503,
+  );
+});
+
 async function createProject(user = "alice"): Promise<Project> {
   const response = await request(
     "/projects",

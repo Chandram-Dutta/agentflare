@@ -1,8 +1,10 @@
 services:
+  docker:
+    command: sudo dockerd --host=unix:///var/run/docker.sock --group "$(id -gn)"
   web:
     command: bun run dev --host 0.0.0.0 --port "$PORT"
     port: 3000
     health: /api/health
     portal:
       title: Agentflare
-      description: Terminal-first workspace prototype. No sandbox or agent credentials connected.
+      description: Terminal-first workspace. Configure installation credentials to start sandboxes.
