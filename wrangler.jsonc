@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentflare-web",
+  "main": "vinext/server/fetch-handler",
+  "compatibility_date": "2026-09-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "not_found_handling": "none" },
+  "observability": { "enabled": true }
+}
