@@ -2,20 +2,22 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTheme } from "next-themes";
+import { Panel, Separator } from "react-resizable-panels";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { File, PatchDiff } from "@pierre/diffs/react";
 import { TerminalPreview } from "./terminal-preview";
 import { Button } from "./ui/button";
-import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { apiRequest } from "@/lib/api-client";
 import type { GitChange, RuntimeState } from "@/lib/runtime";
 
 export function RuntimeWorkspace({
   threadId,
+  projectId,
   children,
 }: {
-  threadId: string;
+  threadId?: string;
+  projectId: string;
   children: (started: boolean) => ReactNode;
 }) {
   const [state, setState] = useState<RuntimeState>();
@@ -23,6 +25,7 @@ export function RuntimeWorkspace({
   const [pending, setPending] = useState(false);
   const base = `/threads/${threadId}/runtime`;
   useEffect(() => {
+    if (!threadId) return;
     let cancelled = false;
     apiRequest<RuntimeState>(`${base}/status`)
       .then((value) => {
@@ -34,7 +37,7 @@ export function RuntimeWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [base]);
+  }, [base, threadId]);
   async function start() {
     setPending(true);
     setError("");
@@ -47,56 +50,61 @@ export function RuntimeWorkspace({
     }
   }
   return (
-    <div className="grid min-w-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px]">
-      <main
-        className="flex min-h-[480px] min-w-0 flex-col"
-        aria-label="Thread terminal"
-      >
-        {children(Boolean(state?.started))}
-        {error && (
-          <p role="alert" className="border-b p-3 text-xs text-destructive">
-            {error}
-          </p>
-        )}
-        {state?.started ? (
-          <TerminalPreview threadId={threadId} />
-        ) : (
-          <div className="flex-1 bg-[var(--terminal)] p-6 text-xs">
-            <p>
-              {pending
-                ? "Starting sandbox and checking out repository…"
-                : "Start this thread to open its CLI agent."}
+    <>
+      <Panel id={`${projectId}-terminal`} defaultSize="36%" minSize="300px">
+        <main
+          className="flex h-full min-w-0 flex-col overflow-auto"
+          aria-label="Thread terminal"
+        >
+          {children(Boolean(state?.started))}
+          {error && (
+            <p role="alert" className="border-b p-3 text-xs text-destructive">
+              {error}
             </p>
-            <p className="mt-3 max-w-lg leading-5 text-muted-foreground">
-              Sign in to the agent inside its terminal. Sandbox files are
-              temporary and may be lost after 30 minutes idle or a container
-              restart. Export important work before leaving; thread metadata is
-              not a backup. Git push credentials are not connected yet.
-            </p>
-            <Button
-              variant="outline"
-              className="mt-4 rounded-none text-xs"
-              disabled={pending || !state}
-              onClick={start}
-            >
-              {pending ? "starting…" : "start sandbox"}
-            </Button>
-          </div>
-        )}
-      </main>
-      <aside
-        className="min-w-0 border-t lg:border-t-0 lg:border-l"
-        aria-label="Thread files and Git stage"
-      >
-        {state?.started ? (
-          <RepositoryInspector base={base} />
-        ) : (
-          <p className="p-4 text-xs text-muted-foreground">
-            Files and Git stage appear when the sandbox starts.
-          </p>
-        )}
-      </aside>
-    </div>
+          )}
+          {state?.started && threadId ? (
+            <TerminalPreview threadId={threadId} />
+          ) : (
+            <div className="flex-1 bg-[var(--terminal)] p-6 text-xs">
+              <p>
+                {!threadId
+                  ? "Create a thread to choose a CLI agent."
+                  : pending
+                    ? "Starting sandbox and checking out repository…"
+                    : "Start this thread to open its CLI agent."}
+              </p>
+              {threadId && (
+                <p className="mt-3 max-w-lg leading-5 text-muted-foreground">
+                  Sign in to the agent inside its terminal. Sandbox files are
+                  temporary and may be lost after 30 minutes idle or a container
+                  restart. Export important work before leaving; thread metadata
+                  is not a backup. Git push credentials are not connected yet.
+                </p>
+              )}
+              {threadId && (
+                <Button
+                  variant="outline"
+                  className="mt-4 rounded-none text-xs"
+                  disabled={pending || !state}
+                  onClick={start}
+                >
+                  {pending ? "starting…" : "start sandbox"}
+                </Button>
+              )}
+            </div>
+          )}
+        </main>
+      </Panel>
+      <Separator
+        className="workspace-divider"
+        aria-label="Resize agent CLI and file view"
+      />
+      <RepositoryInspector
+        base={base}
+        projectId={projectId}
+        started={Boolean(state?.started)}
+      />
+    </>
   );
 }
 
@@ -114,7 +122,7 @@ function RepositoryTree({
   return (
     <FileTree
       model={model}
-      className="block h-72 lg:h-[calc(100dvh-150px)]"
+      className="block h-full"
       onClick={(event) => {
         // Shadow-root events are retargeted to the host. Activate on every click
         // (including native keyboard activation), not only selection changes.
@@ -131,7 +139,15 @@ function RepositoryTree({
   );
 }
 
-function RepositoryInspector({ base }: { base: string }) {
+function RepositoryInspector({
+  base,
+  projectId,
+  started,
+}: {
+  base: string;
+  projectId: string;
+  started: boolean;
+}) {
   const { resolvedTheme } = useTheme();
   const themeType = resolvedTheme === "dark" ? "dark" : "light";
   const [files, setFiles] = useState<string[]>([]);
@@ -143,9 +159,11 @@ function RepositoryInspector({ base }: { base: string }) {
     path: string;
     content?: string;
     patch?: string;
+    label: string;
   }>();
   const selection = useRef(0);
   useEffect(() => {
+    if (!started) return;
     let cancelled = false;
     Promise.all([
       apiRequest<{ files: string[] }>(`${base}/files`),
@@ -164,7 +182,7 @@ function RepositoryInspector({ base }: { base: string }) {
     return () => {
       cancelled = true;
     };
-  }, [base, revision]);
+  }, [base, revision, started]);
   async function open(path: string, staged?: boolean) {
     const request = ++selection.current;
     setView(undefined);
@@ -174,7 +192,17 @@ function RepositoryInspector({ base }: { base: string }) {
       const result = await apiRequest<{ content?: string; patch?: string }>(
         `${base}/${staged === undefined ? "file" : "diff"}?path=${encodeURIComponent(path)}&staged=${staged === true}`,
       );
-      if (request === selection.current) setView({ path, ...result });
+      if (request === selection.current)
+        setView({
+          path,
+          ...result,
+          label:
+            staged === undefined
+              ? "file"
+              : staged
+                ? "staged diff"
+                : "unstaged diff",
+        });
     } catch (error) {
       if (request === selection.current)
         setError(error instanceof Error ? error.message : "Read failed.");
@@ -184,86 +212,40 @@ function RepositoryInspector({ base }: { base: string }) {
   }
   return (
     <>
-      <Tabs defaultValue="files" className="gap-0">
-        <div className="flex items-center justify-between border-b">
-          <TabsList variant="line" aria-label="Thread inspector">
-            <TabsTrigger value="files">files</TabsTrigger>
-            <TabsTrigger value="git">git stage</TabsTrigger>
-          </TabsList>
-          <button
-            type="button"
-            className="px-3 text-[11px] underline"
-            onClick={() => setRevision((v) => v + 1)}
-          >
-            refresh
-          </button>
-        </div>
-        <TabsContent value="files">
-          <RepositoryTree
-            key={revision}
-            files={files}
-            open={(path) => void open(path)}
-          />
-        </TabsContent>
-        <TabsContent value="git" className="p-3 text-xs">
-          <p className="mb-3 text-[11px] text-muted-foreground">
-            Stage and commit in the CLI. Refresh to review.
-          </p>
-          {changes.length === 0 && <p>No changes.</p>}
-          {[true, false].map((staged) => (
-            <div key={String(staged)} className="mb-4">
-              <h3 className="mb-2 text-muted-foreground">
-                {staged ? "staged" : "unstaged / untracked"}
-              </h3>
-              {changes
-                .filter((change) =>
-                  staged
-                    ? ![" ", "?"].includes(change.index)
-                    : change.worktree !== " ",
-                )
-                .map((change) => (
-                  <button
-                    type="button"
-                    key={change.path}
-                    className="block w-full truncate py-1 text-left hover:text-primary"
-                    onClick={() =>
-                      void open(
-                        change.path,
-                        change.index === "?" ? undefined : staged,
-                      )
-                    }
-                  >
-                    {staged ? change.index : change.worktree} {change.path}
-                  </button>
-                ))}
-            </div>
-          ))}
-        </TabsContent>
-      </Tabs>
-      {error && (
-        <p role="alert" className="p-3 text-xs text-destructive">
-          {error}
-        </p>
-      )}
-      {pending && (
-        <p role="status" className="p-3 text-xs">
-          loading…
-        </p>
-      )}
-      <Dialog
-        open={Boolean(view)}
-        onOpenChange={(open) => {
-          if (!open) {
-            selection.current++;
-            setView(undefined);
-          }
-        }}
-      >
-        {view && (
-          <DialogContent className="flex h-[85dvh] max-w-[calc(100%-2rem)] flex-col rounded-none p-0 sm:max-w-[calc(100%-6rem)]">
-            <DialogTitle className="truncate border-b p-3 pr-12 text-xs font-normal">
-              {view.path}
-            </DialogTitle>
+      <Panel id={`${projectId}-viewer`} defaultSize="32%" minSize="300px">
+        <section
+          className="flex h-full min-w-0 flex-col"
+          aria-label="File and diff view"
+        >
+          <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b px-3 text-xs">
+            <span className="truncate" title={view?.path}>
+              {view ? `${view.path} / ${view.label}` : "file / diff"}
+            </span>
+            {view && (
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground"
+                aria-label="Close file view"
+                onClick={() => {
+                  selection.current++;
+                  setView(undefined);
+                }}
+              >
+                close
+              </button>
+            )}
+          </div>
+          {error && (
+            <p role="alert" className="p-3 text-xs text-destructive">
+              {error}
+            </p>
+          )}
+          {pending && (
+            <p role="status" className="p-3 text-xs">
+              loading…
+            </p>
+          )}
+          {view ? (
             <div className="min-h-0 flex-1 overflow-auto">
               {view.content !== undefined ? (
                 <File
@@ -279,9 +261,93 @@ function RepositoryInspector({ base }: { base: string }) {
                 <p className="p-4 text-xs">No text diff available.</p>
               )}
             </div>
-          </DialogContent>
-        )}
-      </Dialog>
+          ) : (
+            !pending && (
+              <p className="p-4 text-xs text-muted-foreground">
+                Select a file or Git change to review it here.
+              </p>
+            )
+          )}
+        </section>
+      </Panel>
+      <Separator
+        className="workspace-divider"
+        aria-label="Resize file view and repository navigation"
+      />
+      <Panel id={`${projectId}-navigation`} defaultSize="18%" minSize="230px">
+        <aside
+          className="flex h-full min-w-0 flex-col"
+          aria-label="Thread files and Git stage"
+        >
+          <Tabs defaultValue="files" className="min-h-0 flex-1 gap-0">
+            <div className="flex items-center justify-between border-b">
+              <TabsList variant="line" aria-label="Thread inspector">
+                <TabsTrigger value="files">files</TabsTrigger>
+                <TabsTrigger value="git">git stage</TabsTrigger>
+              </TabsList>
+              <button
+                type="button"
+                className="px-3 text-[11px] underline"
+                disabled={!started}
+                onClick={() => setRevision((v) => v + 1)}
+              >
+                refresh
+              </button>
+            </div>
+            <TabsContent value="files" className="min-h-0 overflow-auto">
+              {started ? (
+                <RepositoryTree
+                  key={revision}
+                  files={files}
+                  open={(path) => void open(path)}
+                />
+              ) : (
+                <p className="p-4 text-xs text-muted-foreground">
+                  Start a sandbox to browse files.
+                </p>
+              )}
+            </TabsContent>
+            <TabsContent value="git" className="overflow-auto p-3 text-xs">
+              <p className="mb-3 text-[11px] text-muted-foreground">
+                Stage and commit in the CLI. Refresh to review.
+              </p>
+              {changes.length === 0 && (
+                <p>
+                  {started ? "No changes." : "Start a sandbox to inspect Git."}
+                </p>
+              )}
+              {[true, false].map((staged) => (
+                <div key={String(staged)} className="mb-4">
+                  <h3 className="mb-2 text-muted-foreground">
+                    {staged ? "staged" : "unstaged / untracked"}
+                  </h3>
+                  {changes
+                    .filter((change) =>
+                      staged
+                        ? ![" ", "?"].includes(change.index)
+                        : change.worktree !== " ",
+                    )
+                    .map((change) => (
+                      <button
+                        type="button"
+                        key={change.path}
+                        className="block w-full truncate py-1 text-left hover:text-primary"
+                        onClick={() =>
+                          void open(
+                            change.path,
+                            change.index === "?" ? undefined : staged,
+                          )
+                        }
+                      >
+                        {staged ? change.index : change.worktree} {change.path}
+                      </button>
+                    ))}
+                </div>
+              ))}
+            </TabsContent>
+          </Tabs>
+        </aside>
+      </Panel>
     </>
   );
 }

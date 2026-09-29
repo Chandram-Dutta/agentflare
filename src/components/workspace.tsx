@@ -3,6 +3,12 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { ThemeProvider, useTheme } from "next-themes";
 import { Moon, Plus, Sun } from "lucide-react";
+import {
+  Group,
+  Panel,
+  Separator,
+  useDefaultLayout,
+} from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -326,6 +332,10 @@ function ProjectWorkspace({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const thread = threads.find((item) => item.id === selected) ?? threads[0];
+  const layout = useDefaultLayout({
+    id: `agentflare-panes-${project.id}`,
+    onlySaveAfterUserInteractions: true,
+  });
 
   async function addThread() {
     setPending(true);
@@ -347,78 +357,97 @@ function ProjectWorkspace({
     }
   }
 
+  if (!active) return null;
+
   return (
-    <div className="grid min-w-0 flex-1 grid-cols-1 lg:grid-cols-[200px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)]">
-      <aside
-        className="flex min-w-0 flex-col border-b lg:border-r lg:border-b-0"
-        aria-label={`${project.name} threads`}
+    <div className="min-w-0 flex-1 overflow-x-auto">
+      <Group
+        orientation="horizontal"
+        defaultLayout={layout.defaultLayout}
+        onLayoutChanged={layout.onLayoutChanged}
+        className="min-h-[480px] min-w-[1100px]"
+        style={{ height: "calc(100dvh - 89px)" }}
+        aria-label="Workspace panes"
       >
-        <div className="flex h-10 items-center justify-between border-b px-4">
-          <h2 className="text-xs font-normal">threads</h2>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            className="rounded-none"
-            aria-label="New thread"
-            disabled={pending}
-            onClick={addThread}
+        <Panel id={`${project.id}-threads`} defaultSize="14%" minSize="160px">
+          <aside
+            className="flex h-full min-w-0 flex-col"
+            aria-label={`${project.name} threads`}
           >
-            <Plus className="size-3.5" />
-          </Button>
-        </div>
-        <nav
-          aria-label="Threads"
-          className="flex gap-1 overflow-x-auto p-2 lg:flex-col"
-        >
-          {threads.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              aria-current={item.id === thread?.id ? "true" : undefined}
-              onClick={() => setSelected(item.id)}
-              className={`min-w-32 border-l-2 px-3 py-2 text-left text-xs outline-offset-2 focus-visible:outline-primary lg:min-w-0 ${item.id === thread?.id ? "border-primary bg-[var(--terminal)]" : "border-transparent text-muted-foreground hover:bg-[var(--terminal)]"}`}
+            <div className="flex h-10 items-center justify-between border-b px-4">
+              <h2 className="text-xs font-normal">threads</h2>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="rounded-none"
+                aria-label="New thread"
+                disabled={pending}
+                onClick={addThread}
+              >
+                <Plus className="size-3.5" />
+              </Button>
+            </div>
+            <nav
+              aria-label="Threads"
+              className="flex min-h-0 flex-col gap-1 overflow-auto p-2"
             >
-              <span className="block truncate">{item.name}</span>
-              <span className="mt-1 block text-[10px] text-muted-foreground">
-                {agents[item.agent].name}
-              </span>
-            </button>
-          ))}
-        </nav>
-        {error && (
-          <p role="alert" className="px-4 py-2 text-[11px] text-destructive">
-            {error}
-          </p>
-        )}
-        <div className="mt-auto border-t p-3">
-          <ProjectSettings project={project} onSave={onProjectSave} />
-          <p
-            className="mt-2 truncate text-[10px] leading-4 text-muted-foreground"
-            title={project.repository}
-          >
-            {project.repository.replace("https://github.com/", "")}
-          </p>
-        </div>
-      </aside>
-      {thread && active ? (
-        <RuntimeWorkspace key={thread.id} threadId={thread.id}>
-          {(started) => (
-            <ThreadControls
-              key={`${thread.id}:${thread.version}`}
-              thread={thread}
-              onSave={onThreadSave}
-              started={started}
-            />
-          )}
+              {threads.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-current={item.id === thread?.id ? "true" : undefined}
+                  onClick={() => setSelected(item.id)}
+                  className={`min-w-32 border-l-2 px-3 py-2 text-left text-xs outline-offset-2 focus-visible:outline-primary lg:min-w-0 ${item.id === thread?.id ? "border-primary bg-[var(--terminal)]" : "border-transparent text-muted-foreground hover:bg-[var(--terminal)]"}`}
+                >
+                  <span className="block truncate">{item.name}</span>
+                  <span className="mt-1 block text-[10px] text-muted-foreground">
+                    {agents[item.agent].name}
+                  </span>
+                </button>
+              ))}
+            </nav>
+            {error && (
+              <p
+                role="alert"
+                className="px-4 py-2 text-[11px] text-destructive"
+              >
+                {error}
+              </p>
+            )}
+            <div className="mt-auto border-t p-3">
+              <ProjectSettings project={project} onSave={onProjectSave} />
+              <p
+                className="mt-2 truncate text-[10px] leading-4 text-muted-foreground"
+                title={project.repository}
+              >
+                {project.repository.replace("https://github.com/", "")}
+              </p>
+            </div>
+          </aside>
+        </Panel>
+        <Separator
+          className="workspace-divider"
+          aria-label="Resize threads and agent CLI"
+        />
+        <RuntimeWorkspace
+          key={thread?.id ?? "empty"}
+          threadId={thread?.id}
+          projectId={project.id}
+        >
+          {(started) =>
+            thread ? (
+              <ThreadControls
+                key={`${thread.id}:${thread.version}`}
+                thread={thread}
+                onSave={onThreadSave}
+                started={started}
+              />
+            ) : (
+              <div className="h-10 border-b px-3 py-3 text-xs">agent CLI</div>
+            )
+          }
         </RuntimeWorkspace>
-      ) : (
-        <div className="flex-1 bg-[var(--terminal)] p-6 text-xs">
-          <h2 className="font-normal">no threads yet</h2>
-          <p className="mt-2 text-muted-foreground">
-            Create a thread to choose a CLI agent.
-          </p>
-        </div>
-      )}
+      </Group>
     </div>
   );
 }

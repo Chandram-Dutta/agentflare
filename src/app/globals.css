@@ -66,6 +66,25 @@
   box-shadow: none;
 }
 
+.workspace-divider {
+  width: 5px;
+  background: linear-gradient(
+    to right,
+    transparent 2px,
+    var(--border) 2px,
+    var(--border) 3px,
+    transparent 3px
+  );
+  transition: background-color 100ms;
+}
+
+.workspace-divider:hover,
+.workspace-divider:focus-visible,
+.workspace-divider[data-separator="active"] {
+  background: var(--primary);
+  outline: none;
+}
+
 .work-tabs [data-slot="tabs-list"] {
   height: 40px;
   padding: 0;
