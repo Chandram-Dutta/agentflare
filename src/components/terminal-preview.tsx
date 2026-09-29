@@ -85,7 +85,19 @@ export function TerminalPreview({ threadId }: { threadId: string }) {
           terminal?.write(new Uint8Array(event.data));
         else {
           const message = JSON.parse(event.data);
-          if (message.type === "ready") setStatus("connected");
+          if (message.type === "ready" && terminal) {
+            // Existing PTYs retain their old dimensions on reconnect. Also
+            // catch pane resizes that happened while the socket was connecting.
+            fit.fit();
+            socket?.send(
+              JSON.stringify({
+                type: "resize",
+                cols: terminal.cols,
+                rows: terminal.rows,
+              }),
+            );
+            setStatus("connected");
+          }
           if (message.type === "exit")
             setStatus(`agent exited (${message.exitCode ?? "unknown"})`);
           if (message.type === "error")
