@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
+import { isAPIError } from "better-auth/api";
 import { z } from "zod";
 import { and, asc, eq, getTableColumns, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -36,6 +37,15 @@ api.use("*", async (c, next) => {
 api.onError((error, c) => {
   if (error instanceof HTTPException)
     return c.json({ error: error.message }, error.status);
+  // Do not log request headers, tokens, or arbitrary exception messages.
+  console.error({
+    event: "api_error",
+    method: c.req.method,
+    path: c.req.path,
+    type: error.name,
+    code: isAPIError(error) ? error.body?.code : undefined,
+    frames: error.stack?.split("\n").filter((line) => /^\s+at /.test(line)),
+  });
   return c.json(
     {
       error:
