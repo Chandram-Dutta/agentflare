@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "@xterm/xterm/css/xterm.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -49,13 +50,6 @@
     background: var(--primary);
     color: var(--background);
   }
-}
-
-/* Ghostty owns the canvas cursor. Its contenteditable input host must never
-   paint a second browser caret; its hidden textarea stays within this host. */
-[data-terminal-host],
-[data-terminal-host] textarea {
-  caret-color: transparent;
 }
 
 .workspace-input {

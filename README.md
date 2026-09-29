@@ -12,11 +12,11 @@ A persistent, authenticated workspace with an initial Cloudflare Sandbox runtime
 - GitHub sign-in through Better Auth; closed-by-default GitHub account allowlist.
 - D1/Drizzle projects and threads, private to their owner and saved across reloads.
 - Project tabs, per-project threads, a center terminal and a Files/Git stage inspector.
-- Monospace light/dark workspace with a Ghostty terminal renderer.
+- Monospace light/dark workspace with an xterm.js terminal renderer.
 - Server-side ownership checks, exact-origin write protection and stale-edit detection.
 
 Each started thread checks user and GitHub App repository access, clones into its
-own sandbox/branch, and opens Claude Code or Codex in a native PTY. Ghostty carries
+own sandbox/branch, and opens Claude Code or Codex in a native PTY. xterm.js carries
 binary WebSocket input/output and resize messages. Reconnecting attaches to the
 same live agent. Files and Git stage use Pierre Trees/Diffs with actual repository
 data; use refresh after agent edits. Stage and commit through the CLI.
@@ -39,8 +39,8 @@ bun run db:migrate:local
 bun run dev
 ```
 
-In an Amp orb, `.agents/setup` installs locked dependencies and prepares the WASM
-asset. `amp orb services ensure` starts the supervised dev service and prints the
+In an Amp orb, `.agents/setup` installs locked dependencies.
+`amp orb services ensure` starts the supervised dev service and prints the
 authenticated review portal. Setup runs without account credentials.
 
 ```sh
@@ -51,8 +51,7 @@ bun run build      # Cloudflare Worker + browser production bundles; no deployme
 bun run preview    # Local production preview using workerd
 ```
 
-`postinstall` copies Ghostty's packaged WASM into `public/`; never commit that
-generated binary. Keep vinext pinned while evaluating its compatibility.
+Keep vinext pinned while evaluating its compatibility.
 
 ## Self-hosting on your Cloudflare account
 

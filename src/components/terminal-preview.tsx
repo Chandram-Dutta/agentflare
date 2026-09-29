@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
-import type { Terminal } from "ghostty-web";
+import type { Terminal } from "@xterm/xterm";
 
 export function TerminalPreview({ threadId }: { threadId: string }) {
   const container = useRef<HTMLDivElement>(null);
@@ -20,12 +20,13 @@ export function TerminalPreview({ threadId }: { threadId: string }) {
     let socket: WebSocket | undefined;
 
     async function open() {
-      const { Ghostty, Terminal, FitAddon } = await import("ghostty-web");
-      const ghostty = await Ghostty.load("/ghostty-vt.wasm");
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import("@xterm/xterm"),
+        import("@xterm/addon-fit"),
+      ]);
       if (cancelled || !container.current) return;
       const style = getComputedStyle(container.current);
       terminal = new Terminal({
-        ghostty,
         fontSize: 13,
         fontFamily:
           "ui-monospace, SFMono-Regular, Consolas, Liberation Mono, monospace",
@@ -37,27 +38,15 @@ export function TerminalPreview({ threadId }: { threadId: string }) {
         },
       });
       const fit = new FitAddon();
-      const previousFocus = document.activeElement;
       terminal.loadAddon(fit);
       terminal.open(container.current);
-      // Ghostty focuses its editable host on open. Do not steal focus from setup
-      // controls when loading WASM or switching themes.
-      if (
-        previousFocus instanceof HTMLElement &&
-        previousFocus !== document.body
-      ) {
-        previousFocus.focus({ preventScroll: true });
-      } else {
-        container.current.blur();
-      }
       terminal.onResize(({ cols, rows }) => {
         setDimensions(`${cols} × ${rows}`);
         if (socket?.readyState === WebSocket.OPEN)
           socket.send(JSON.stringify({ type: "resize", cols, rows }));
       });
       fit.fit();
-      // FitAddon.observeResize drops notifications during its 50ms resize lock.
-      // Queue every notification so a quick tab switch + resize isn't lost.
+      // Coalesce pane dragging, retaining the final dimensions.
       observer = new ResizeObserver(() => {
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => fit.fit(), 100);
