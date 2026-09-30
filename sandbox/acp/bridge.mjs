@@ -661,6 +661,7 @@ export function createUserBridge({
       if (c.promptIds.has(action.requestId)) return;
       if (c.snapshot.status !== "ready" || typeof action.text !== "string" || !action.text.trim() || action.text.length > 16000 || typeof action.requestId !== "string") throw new Error("Cannot send prompt");
       c.promptIds.add(action.requestId); if (c.promptIds.size > 1000) c.promptIds.delete(c.promptIds.values().next().value);
+      c.turn = action.requestId;
       append(c, "user", action.text, action.requestId); c.currentMessage = undefined; c.snapshot.status = "running";
       c.prompt = agent.request(methods.agent.session.prompt, { sessionId: c.sessionId, prompt: [{ type: "text", text: action.text }] })
         .then(() => { settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; }).catch((e) => fail(c, e));
@@ -704,7 +705,13 @@ export function createUserBridge({
     await Promise.resolve();
     return c.public;
   }
-  return { session, isAlive: () => !dead, async deleteSession(threadId) {
+  return { session, isAlive: () => !dead,
+    activity: () => Object.fromEntries([...contexts].map(([id, { snapshot: s, turn }]) => [id, {
+      status: s.status,
+      attention: s.permissions.length > 0 || Boolean(s.login),
+      turn: turn ?? s.messages.findLast((m) => m.role === "user")?.id,
+    }])),
+    async deleteSession(threadId) {
     if (!UUID.test(threadId)) throw new Error("Invalid thread id");
     deleted.add(threadId);
     const c = contexts.get(threadId); if (!c) return;
@@ -726,6 +733,8 @@ if (import.meta.main) {
     async fetch(request) {
       const path = new URL(request.url).pathname;
       if (shared && path === "/health") return new Response(null, { status: bridge.isAlive() ? 204 : 503 });
+      if (shared && path === "/activity" && request.method === "GET")
+        return Response.json(bridge.activity(), { headers: { "Cache-Control": "no-store" } });
       let target = bridge;
       let threadId;
       if (shared) {

@@ -449,6 +449,34 @@ api.delete("/threads/:id", async (c) => {
   return c.json({ deleted: true });
 });
 
+api.get("/activity", async (c) => {
+  const owned = await c
+    .get("db")
+    .select({ id: thread.id })
+    .from(thread)
+    .innerJoin(project, eq(thread.projectId, project.id))
+    .where(
+      and(eq(project.ownerId, c.get("user").id), eq(thread.runtime, "user")),
+    );
+  if (!owned.length) return c.json({});
+  if (!c.env.Sandboxes) return c.json({ error: "Activity unavailable." }, 503);
+  try {
+    const sandbox = c.env.Sandboxes.get(
+      c.env.Sandboxes.idFromName(userSandboxName(c.get("user").id)),
+    );
+    const activity = await sandbox.userActivity();
+    return c.json(
+      Object.fromEntries(
+        owned
+          .filter(({ id }) => activity[id])
+          .map(({ id }) => [id, activity[id]]),
+      ),
+    );
+  } catch {
+    return c.json({ error: "Activity unavailable. Retrying…" }, 503);
+  }
+});
+
 const acpAction = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("connect") }),
   z.strictObject({ type: z.literal("authenticate") }),

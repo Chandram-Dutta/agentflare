@@ -24,12 +24,14 @@ export function TerminalPreview({ threadId }: { threadId: string }) {
         import("@xterm/xterm"),
         import("@xterm/addon-fit"),
       ]);
+      await document.fonts
+        .load('13px "JetBrains Mono Variable"')
+        .catch(() => []);
       if (cancelled || !container.current) return;
       const style = getComputedStyle(container.current);
       terminal = new Terminal({
         fontSize: 13,
-        fontFamily:
-          "ui-monospace, SFMono-Regular, Consolas, Liberation Mono, monospace",
+        fontFamily: style.fontFamily,
         cursorBlink: false,
         theme: {
           background: style.getPropertyValue("--terminal").trim(),

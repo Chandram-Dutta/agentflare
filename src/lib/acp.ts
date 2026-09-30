@@ -5,6 +5,12 @@ export type AcpMessage = {
   status?: string;
 };
 
+export type AcpActivity = {
+  status: AcpSnapshot["status"];
+  attention: boolean;
+  turn?: string;
+};
+
 export type AcpSnapshot = {
   authScope?: "user";
   authPersistence?: "saved" | "pending";

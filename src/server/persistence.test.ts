@@ -364,6 +364,46 @@ test("new Codex threads share a user runtime while existing metadata defaults to
   ).toBe(400);
 });
 
+test("activity only exposes owned shared threads and never calls a startup method", async () => {
+  const own = await createThread((await createProject()).id);
+  const foreign = await createThread((await createProject("bob")).id, "bob");
+  let calls = 0;
+  env.Sandboxes = {
+    idFromName: (name: string) => {
+      expect(name).toMatch(/^user-[a-f0-9]{58}$/);
+      return name;
+    },
+    get: () => ({
+      userActivity: async () => {
+        calls++;
+        return {
+          [own.id]: { status: "running", attention: false, turn: "own-turn" },
+          [foreign.id]: {
+            status: "ready",
+            attention: false,
+            turn: "private-turn",
+          },
+        };
+      },
+    }),
+  } as unknown as NonNullable<Bindings["Sandboxes"]>;
+  try {
+    expect(
+      (await request("/activity", "GET", undefined, "alice", { cookie: "" }))
+        .status,
+    ).toBe(401);
+    expect(calls).toBe(0);
+    const response = await request("/activity");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      [own.id]: { status: "running", attention: false, turn: "own-turn" },
+    });
+    expect(calls).toBe(1);
+  } finally {
+    delete env.Sandboxes;
+  }
+});
+
 test("checkpoint endpoint requires its capability rather than a browser login and returns no credentials", async () => {
   const id = "a".repeat(64);
   const token = "b".repeat(72);

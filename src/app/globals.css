@@ -3,11 +3,20 @@
 @import "shadcn/tailwind.css";
 @import "@xterm/xterm/css/xterm.css";
 
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --font-mono:
-    ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    "JetBrains Mono Variable", ui-monospace, "SFMono-Regular", Consolas,
+    monospace;
   --font-sans: var(--font-mono);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -146,4 +155,9 @@
   --trees-font-family-override: var(--font-mono);
   --trees-font-size-override: 12px;
   --trees-border-radius-override: 6px;
+}
+
+diffs-container {
+  --diffs-font-family: var(--font-mono);
+  --diffs-header-font-family: var(--font-mono);
 }

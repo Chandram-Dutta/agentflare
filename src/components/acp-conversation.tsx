@@ -1,15 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, type FormEvent } from "react";
 import { ArrowUp, SquareTerminal, LogOut, Square } from "lucide-react";
 import { createPortal } from "react-dom";
 import { Button } from "./ui/button";
 import { AcpMessages } from "./acp-messages";
 import { AcpComposerControls } from "./acp-composer-controls";
-import type { AcpAction, AcpSnapshot } from "@/lib/acp";
-import { apiRequest } from "@/lib/api-client";
-
-const POLL_INTERVAL = 1000;
+import type { AcpAction } from "@/lib/acp";
+import { useThreadStore, useThreadState } from "./thread-state";
 
 function safeLoginUrl(value: string): string | null {
   try {
@@ -32,84 +30,24 @@ export function AcpConversation({
   threadId: string;
   headerTarget?: HTMLDivElement | null;
 }) {
-  const [snapshot, setSnapshot] = useState<AcpSnapshot>();
-  const [prompt, setPrompt] = useState("");
-  const [networkError, setNetworkError] = useState("");
-  const [actionPending, setActionPending] = useState(false);
-  const generation = useRef(0);
-  const mounted = useRef(true);
+  const store = useThreadStore();
+  const {
+    snapshot,
+    draft: prompt,
+    error: networkError,
+    pending: actionPending,
+  } = useThreadState(threadId);
+  const setPrompt = (draft: string) => store.update(threadId, { draft });
   const transcript = useRef<HTMLDivElement>(null);
-  const base = `/threads/${threadId}/runtime/acp`;
-
-  async function action(value: AcpAction) {
-    const request = ++generation.current;
-    setActionPending(true);
-    setNetworkError("");
-    try {
-      const result = await apiRequest<AcpSnapshot>(base, "POST", value);
-      if (mounted.current && request === generation.current)
-        setSnapshot(result);
-      return true;
-    } catch (error) {
-      if (mounted.current && request === generation.current) {
-        setNetworkError(
-          error instanceof Error ? error.message : "Request failed.",
-        );
-      }
-      return false;
-    } finally {
-      if (mounted.current && request === generation.current)
-        setActionPending(false);
-    }
-  }
-
-  useEffect(() => {
-    mounted.current = true;
-    const request = ++generation.current;
-    void apiRequest<AcpSnapshot>(base, "POST", { type: "connect" }).then(
-      (result) => {
-        if (mounted.current && request === generation.current)
-          setSnapshot(result);
-      },
-      (error: unknown) => {
-        if (mounted.current && request === generation.current)
-          setNetworkError(
-            error instanceof Error ? error.message : "Connection failed.",
-          );
-      },
-    );
+  const action = (value: AcpAction) => store.action(threadId, value);
+  useLayoutEffect(() => {
+    const element = transcript.current;
+    if (element)
+      element.scrollTop = store.get(threadId).scroll ?? element.scrollHeight;
     return () => {
-      mounted.current = false;
-      // Invalidate any GET or POST that resolves after this keyed mount ends.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      generation.current++;
+      if (element) store.update(threadId, { scroll: element.scrollTop });
     };
-  }, [base]);
-
-  useEffect(() => {
-    if (networkError) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
-      const request = generation.current;
-      try {
-        const result = await apiRequest<AcpSnapshot>(base);
-        if (!cancelled && request === generation.current) setSnapshot(result);
-      } catch (error) {
-        if (!cancelled && request === generation.current)
-          setNetworkError(
-            error instanceof Error ? error.message : "Connection lost.",
-          );
-        return;
-      }
-      if (!cancelled) timer = setTimeout(poll, POLL_INTERVAL);
-    };
-    timer = setTimeout(poll, POLL_INTERVAL);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [base, networkError]);
+  }, [store, threadId]);
 
   useEffect(() => {
     const element = transcript.current;
@@ -126,12 +64,11 @@ export function AcpConversation({
     event.preventDefault();
     const text = prompt.trim();
     if (!text || snapshot?.status !== "ready" || actionPending) return;
-    const sent = await action({
+    await action({
       type: "prompt",
       text,
       requestId: crypto.randomUUID(),
     });
-    if (sent) setPrompt("");
   }
 
   const loginUrl = snapshot?.login ? safeLoginUrl(snapshot.login.url) : null;

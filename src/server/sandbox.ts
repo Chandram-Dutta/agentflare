@@ -1,5 +1,5 @@
 import { Sandbox } from "@cloudflare/sandbox";
-import type { AcpAction, AcpSnapshot } from "@/lib/acp";
+import type { AcpAction, AcpSnapshot, AcpActivity } from "@/lib/acp";
 import { shellArgument, type RuntimeState } from "@/lib/runtime";
 import type { AgentId } from "@/lib/workspace";
 import type { BranchReview, PublishInput, PublishResult } from "@/lib/runtime";
@@ -45,6 +45,15 @@ export class ThreadSandbox extends Sandbox<Bindings> {
   }
   userAcp(id: string, action?: AcpAction) {
     return this.shared.acp(id, action);
+  }
+  async userActivity(): Promise<Record<string, AcpActivity>> {
+    // Inspect only a live container. Status polling must not boot a sandbox.
+    if (!this.ctx.container?.running) return {};
+    const response = await this.ctx.container
+      .getTcpPort(8766)
+      .fetch("http://container/activity");
+    if (!response.ok) throw Error("Activity unavailable.");
+    return response.json();
   }
   saveCodexCredentials(token: string, value: string | null) {
     return this.shared.persist(token, value);

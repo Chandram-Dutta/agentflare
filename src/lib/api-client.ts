@@ -2,11 +2,13 @@ export async function apiRequest<T>(
   path: string,
   method = "GET",
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(`/api${path}`, {
     method,
     credentials: "same-origin",
     cache: "no-store",
+    signal,
     ...(body === undefined
       ? {}
       : {

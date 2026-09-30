@@ -40,6 +40,11 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { RuntimeWorkspace } from "@/components/runtime-workspace";
+import {
+  ThreadStateProvider,
+  ThreadActivity,
+  useThreadStore,
+} from "./thread-state";
 import { ProjectSettings } from "@/components/project-settings";
 import { apiRequest } from "@/lib/api-client";
 import {
@@ -188,7 +193,9 @@ function WorkspaceContent() {
         </div>
       )}
       {session?.user ? (
-        <SavedWorkspace renderHeader={renderHeader} />
+        <ThreadStateProvider>
+          <SavedWorkspace renderHeader={renderHeader} />
+        </ThreadStateProvider>
       ) : (
         <main className="mx-auto mt-16 w-full max-w-lg px-6 text-xs sm:mt-28">
           {!session ? (
@@ -327,6 +334,15 @@ function SavedWorkspace({
               {data.projects.map((project) => (
                 <TabsTrigger key={project.id} value={project.id}>
                   {project.name}
+                  <ThreadActivity
+                    compact
+                    ids={data.threads
+                      .filter(
+                        (t) =>
+                          t.projectId === project.id && t.runtime === "user",
+                      )
+                      .map((t) => t.id)}
+                  />
                 </TabsTrigger>
               ))}
             </TabsList>
@@ -398,6 +414,7 @@ function ProjectWorkspace({
 }) {
   const [selected, setSelected] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Thread>();
+  const store = useThreadStore();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const thread = threads.find((item) => item.id === selected) ?? threads[0];
@@ -476,6 +493,7 @@ function ProjectWorkspace({
     setError("");
     try {
       await apiRequest(`/threads/${deleteTarget.id}`, "DELETE");
+      store.forget(deleteTarget.id);
       onThreadDelete(deleteTarget.id);
       setDeleteTarget(undefined);
     } catch (error) {
@@ -620,7 +638,11 @@ function ProjectWorkspace({
                   >
                     <span className="block truncate">{item.name}</span>
                     <span className="mt-1 block text-[10px] text-muted-foreground">
-                      {agents[item.agent].name}
+                      {item.agent === "codex" && item.runtime === "user" ? (
+                        <ThreadActivity ids={[item.id]} />
+                      ) : (
+                        agents[item.agent].name
+                      )}
                     </span>
                   </button>
                   <Button

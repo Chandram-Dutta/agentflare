@@ -12,7 +12,9 @@ import { Button } from "./ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { PublishChanges } from "./publish-changes";
 import { apiRequest } from "@/lib/api-client";
-import type { BranchReview, GitChange, RuntimeState } from "@/lib/runtime";
+import type { BranchReview, GitChange } from "@/lib/runtime";
+import { useThreadStore, useThreadState } from "./thread-state";
+import type { RepositoryState } from "@/lib/thread-state";
 
 export function RuntimeWorkspace({
   threadId,
@@ -25,37 +27,22 @@ export function RuntimeWorkspace({
   hiddenPanes: string[];
   children: (started: boolean) => ReactNode;
 }) {
-  const [state, setState] = useState<RuntimeState>();
-  const [error, setError] = useState("");
-  const [pending, setPending] = useState(false);
+  const store = useThreadStore();
+  const { runtime: state, error, pending } = useThreadState(threadId ?? "");
   const [agentControls, setAgentControls] = useState<HTMLDivElement | null>(
     null,
   );
   const base = `/threads/${threadId}/runtime`;
+  const conversationVisible = !hiddenPanes.includes("terminal");
   useEffect(() => {
-    if (!threadId) return;
-    let cancelled = false;
-    apiRequest<RuntimeState>(`${base}/status`)
-      .then((value) => {
-        if (!cancelled) setState(value);
-      })
-      .catch((error: Error) => {
-        if (!cancelled) setError(error.message);
-      });
+    store.select(threadId, conversationVisible);
+    if (threadId) void store.ensure(threadId);
     return () => {
-      cancelled = true;
+      if (store.active === threadId) store.select(undefined);
     };
-  }, [base, threadId]);
+  }, [store, threadId, conversationVisible]);
   async function start() {
-    setPending(true);
-    setError("");
-    try {
-      setState(await apiRequest<RuntimeState>(`${base}/start`, "POST", {}));
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Start failed.");
-    } finally {
-      setPending(false);
-    }
+    if (threadId) await store.start(threadId);
   }
   return (
     <>
@@ -78,7 +65,7 @@ export function RuntimeWorkspace({
               className="flex shrink-0 items-center pr-2"
             />
           </div>
-          {error && (
+          {error && !state?.started && (
             <p role="alert" className="border-b p-3 text-xs text-destructive">
               {error}
             </p>
@@ -115,10 +102,16 @@ export function RuntimeWorkspace({
                 <Button
                   variant="outline"
                   className="mt-4 rounded-none text-xs"
-                  disabled={pending || !state}
-                  onClick={start}
+                  disabled={pending || (!state && !error)}
+                  onClick={() =>
+                    state ? void start() : void store.ensure(threadId)
+                  }
                 >
-                  {pending ? "starting…" : "start sandbox"}
+                  {pending
+                    ? "starting…"
+                    : !state && error
+                      ? "retry status"
+                      : "start sandbox"}
                 </Button>
               )}
             </div>
@@ -132,6 +125,7 @@ export function RuntimeWorkspace({
       <RepositoryInspector
         key={base}
         base={base}
+        threadId={threadId ?? ""}
         projectId={projectId}
         hiddenPanes={hiddenPanes}
         started={Boolean(state?.started)}
@@ -173,33 +167,48 @@ function RepositoryTree({
 
 function RepositoryInspector({
   base,
+  threadId,
   projectId,
   started,
   hiddenPanes,
 }: {
   base: string;
+  threadId: string;
   projectId: string;
   started: boolean;
   hiddenPanes: string[];
 }) {
   const { resolvedTheme } = useTheme();
   const themeType = resolvedTheme === "dark" ? "dark" : "light";
-  const [files, setFiles] = useState<string[]>([]);
-  const [changes, setChanges] = useState<GitChange[]>([]);
-  const [review, setReview] = useState<BranchReview>();
+  const store = useThreadStore();
+  const cached = store.get(threadId).repository;
+  const [files, setFiles] = useState<string[]>(cached?.files ?? []);
+  const [changes, setChanges] = useState<GitChange[]>(cached?.changes ?? []);
+  const [review, setReview] = useState<BranchReview | undefined>(
+    cached?.review,
+  );
+  const [tab, setTab] = useState(cached?.tab ?? "files");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [view, setView] = useState<{
-    path: string;
-    content?: string;
-    patch?: string;
-    label: string;
-  }>();
+  const [view, setView] = useState<RepositoryState["view"]>(cached?.view);
   const selection = useRef(0);
   const selected = useRef<{ path: string; staged?: boolean | "branch" }>(
-    undefined,
+    cached?.selected,
   );
+  useEffect(() => {
+    if (threadId)
+      store.update(threadId, {
+        repository: {
+          files,
+          changes,
+          review,
+          view,
+          tab,
+          selected: selected.current,
+        },
+      });
+  }, [store, threadId, files, changes, review, view, tab]);
   useEffect(() => {
     if (!started) return;
     let cancelled = false;
@@ -374,7 +383,11 @@ function RepositoryInspector({
           className="flex h-full min-w-0 flex-col"
           aria-label="Thread files and Git stage"
         >
-          <Tabs defaultValue="files" className="min-h-0 flex-1 gap-0">
+          <Tabs
+            value={tab}
+            onValueChange={(value) => setTab(String(value))}
+            className="min-h-0 flex-1 gap-0"
+          >
             <div className="flex h-10 shrink-0 items-center justify-between border-b px-1">
               <TabsList
                 variant="line"

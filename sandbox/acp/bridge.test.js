@@ -200,19 +200,26 @@ async function sharedFixture(authenticated, run) {
 
 test("shared bridge isolates routing and deletion", async () => {
   await sharedFixture(true, async (bridge) => {
+    expect(bridge.activity()).toEqual({});
     const a = await bridge.session(threadA);
     const b = await bridge.session(threadB);
     await Promise.all([a.ready, b.ready]);
     await a.act({ type: "prompt", text: "inspect", requestId: "same-id" });
     await b.act({ type: "prompt", text: "inspect", requestId: "same-id" });
     await until(() => a.snapshot.permissions.length === 1 && b.snapshot.permissions.length === 1);
+    expect(bridge.activity()).toEqual({
+      [threadA]: { status: "running", attention: true, turn: "same-id" },
+      [threadB]: { status: "running", attention: true, turn: "same-id" },
+    });
     expect(a.snapshot.messages.at(-1).text).toContain(threadA);
     expect(b.snapshot.messages.at(-1).text).toContain(threadB);
     await expect(a.act({ type: "permission", id: b.snapshot.permissions[0].id, optionId: "deny" })).rejects.toThrow();
     await a.act({ type: "permission", id: a.snapshot.permissions[0].id, optionId: "deny" });
     await b.act({ type: "permission", id: b.snapshot.permissions[0].id, optionId: "allow" });
     await until(() => a.snapshot.status === "ready" && b.snapshot.status === "ready");
+    expect(bridge.activity()[threadA]).toEqual({ status: "ready", attention: false, turn: "same-id" });
     await bridge.deleteSession(threadA);
+    expect(bridge.activity()[threadA]).toBeUndefined();
     await b.act({ type: "prompt", text: "inspect", requestId: "still-alive" });
     await until(() => b.snapshot.permissions.length === 1);
     expect(b.snapshot.status).toBe("running");
