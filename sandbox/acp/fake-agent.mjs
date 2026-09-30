@@ -1,6 +1,6 @@
 // Scripted protocol peer for bridge regression tests. No provider access.
 import { createInterface } from "node:readline";
-import { existsSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
 if (process.argv.includes("slow-exit")) {
   process.on("SIGTERM", () => setTimeout(() => {
     writeFileSync("child-exited", "yes");
@@ -52,6 +52,7 @@ const initialConfig = [
 ];
 createInterface({ input: process.stdin }).on("line", (line) => {
   const m = JSON.parse(line);
+  if (m.method) appendFileSync("requests", `${m.method}\n`);
   if (m.method === "initialize") {
     if (!m.params.clientCapabilities.elicitation.url) process.exit(2);
     reply(m.id, {
@@ -64,6 +65,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const sessionId = m.method === "session/load" ? m.params.sessionId
       : shared ? `session-${m.params.cwd.split("/").at(-2)}` : "saved-session";
     if (m.method === "session/load") {
+      if (existsSync("fail-load")) return send({ id: m.id, error: { code: -32603, message: "Internal error", data: { details: "no rollout found for thread id synthetic-private-detail" } } });
       if (broken) return error(m.id, -32002);
       update({
         sessionUpdate: "user_message_chunk",
@@ -108,6 +110,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }, 100);
   } else if (m.method === "session/prompt") {
     const sessionId = m.params.sessionId;
+    if (m.params.prompt[0].text === "quota") return send({ id: m.id, error: { code: -32603, message: "Internal error", data: { codexErrorInfo: "usageLimitExceeded", message: "synthetic-private-detail" } } });
     if (m.params.prompt[0].text === "rich" || m.params.prompt[0].type !== "text") {
       for (const content of m.params.prompt) {
         update({

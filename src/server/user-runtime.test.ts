@@ -16,6 +16,7 @@ const b = "22222222-2222-4222-8222-222222222222";
 function fixture() {
   const records = new Map<string, unknown>();
   const commands: string[] = [];
+  const requests: { url: string; method?: string; body?: unknown }[] = [];
   const files = new Map<string, string>();
   let starts = 0;
   let running = false;
@@ -57,6 +58,11 @@ function fixture() {
       running = false;
     },
     async containerFetch(url: string, init: RequestInit) {
+      requests.push({
+        url,
+        method: init.method,
+        body: init.body ? JSON.parse(String(init.body)) : undefined,
+      });
       if (url.endsWith("/health") || init.method === "DELETE")
         return new Response(null, { status: 204 });
       return Response.json({ status: "ready", messages: [], permissions: [] });
@@ -73,7 +79,7 @@ function fixture() {
   );
   for (const id of [a, b])
     records.set(`workspace:${id}`, { started: true, agent: "codex" });
-  return { runtime, records, commands, files, starts: () => starts };
+  return { runtime, records, commands, files, requests, starts: () => starts };
 }
 
 test("credentials are randomized, authenticated and bound to one user's runtime", async () => {
@@ -111,6 +117,21 @@ test("concurrent threads share one process, restore auth once and deleting one p
   await expect(f.runtime.delete("../../.codex")).rejects.toThrow(
     "Invalid thread id",
   );
+});
+
+test("connect reaches a live bridge as an action; passive polling stays read-only", async () => {
+  const f = fixture();
+  await f.runtime.acp(a);
+  await f.runtime.acp(a, { type: "connect" });
+  expect(f.starts()).toBe(1);
+  expect(f.requests.filter((r) => r.url.endsWith(`/acp/${a}`))).toEqual([
+    { url: `http://127.0.0.1/acp/${a}`, method: "GET", body: undefined },
+    {
+      url: `http://127.0.0.1/acp/${a}`,
+      method: "POST",
+      body: { type: "connect" },
+    },
+  ]);
 });
 
 test("only current callback capability can replace or clear saved credentials", async () => {

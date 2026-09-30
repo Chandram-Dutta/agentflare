@@ -191,39 +191,6 @@ export function AcpConversation({
               Showing recent output. Long messages may be shortened.
             </p>
           )}
-          {saved && (
-            <div className="rounded-md border bg-muted/30 p-3 text-muted-foreground">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p>Saved history. Resume the workspace to continue.</p>
-                <Button
-                  variant="outline"
-                  className="h-7 rounded-md text-xs"
-                  disabled={actionPending}
-                  onClick={() => void action({ type: "connect" })}
-                >
-                  <RotateCcw className="mr-1 size-3" aria-hidden="true" />
-                  Resume workspace
-                </Button>
-              </div>
-              {snapshot?.interrupted && (
-                <p className="mt-2">
-                  Previous operation may have been interrupted; it will not be
-                  rerun automatically.
-                </p>
-              )}
-              {persistence && persistence.state !== "saved" && (
-                <p className="mt-2">
-                  This history may be newer than the saved files. Only the last
-                  successful workspace checkpoint can be restored.
-                </p>
-              )}
-              {networkError && (
-                <p role="alert" className="mt-2 text-destructive">
-                  {networkError}
-                </p>
-              )}
-            </div>
-          )}
           {!snapshot && !networkError && (
             <p role="status" className="text-muted-foreground">
               connecting to Codex…
@@ -376,6 +343,40 @@ export function AcpConversation({
       </div>
 
       <form onSubmit={send} className="border-t px-3 py-2">
+        {saved && (
+          <div className="mx-auto mb-2 w-full max-w-3xl rounded-md border bg-muted/30 p-3 text-muted-foreground">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p>Saved history. Resume the workspace to continue.</p>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-7 rounded-md text-xs"
+                disabled={actionPending}
+                onClick={() => void action({ type: "connect" })}
+              >
+                <RotateCcw className="mr-1 size-3" aria-hidden="true" />
+                Resume workspace
+              </Button>
+            </div>
+            {snapshot?.interrupted && (
+              <p className="mt-2">
+                Previous operation may have been interrupted; it will not be
+                rerun automatically.
+              </p>
+            )}
+            {persistence && persistence.state !== "saved" && (
+              <p className="mt-2">
+                This history may be newer than the saved files. Only the last
+                successful workspace checkpoint can be restored.
+              </p>
+            )}
+            {networkError && (
+              <p role="alert" className="mt-2 text-destructive">
+                {networkError}
+              </p>
+            )}
+          </div>
+        )}
         <AcpComposerControls
           options={snapshot?.configOptions}
           contextUsage={snapshot?.contextUsage}

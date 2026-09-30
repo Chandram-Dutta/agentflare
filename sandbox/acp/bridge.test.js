@@ -249,6 +249,58 @@ test("shared rich content remains isolated by session", async () => {
   });
 });
 
+test("reconnect retries a failed load once without replacing history or interrupting siblings", async () => {
+  await sharedFixture(true, async (bridge, root) => {
+    await writeFile(join(root, threadA, "acp-session"), "saved-session");
+    await writeFile(join(root, "fail-load"), "yes");
+    const a = await bridge.session(threadA);
+    const b = await bridge.session(threadB);
+    await Promise.all([a.ready, b.ready]);
+    expect(a.snapshot.status).toBe("error");
+    expect(a.snapshot.error).toContain("could not find the saved session");
+    expect(a.snapshot.error).not.toContain("synthetic-private-detail");
+    await b.act({ type: "prompt", text: "inspect", requestId: "sibling" });
+    await until(() => b.snapshot.permissions.length === 1);
+    // A permanent failure must not be replaced with an empty new session.
+    await a.act({ type: "connect" });
+    await a.ready;
+    expect(a.snapshot.status).toBe("error");
+    expect(await readFile(join(root, threadA, "acp-session"), "utf8")).toBe("saved-session");
+    await rm(join(root, "fail-load"));
+    await Promise.all([a.act({ type: "connect" }), a.act({ type: "connect" })]);
+    await a.ready;
+    expect(a.snapshot.status).toBe("ready");
+    expect(a.snapshot.error).toBeUndefined();
+    expect(a.snapshot.messages.map(m => m.text)).toEqual(["previous task", "restored answer"]);
+    expect(b.snapshot.status).toBe("running");
+    expect(b.snapshot.permissions).toHaveLength(1);
+    await a.act({ type: "connect" });
+    await b.act({ type: "connect" });
+    const calls = (await readFile(join(root, "requests"), "utf8")).trim().split("\n");
+    expect(calls.filter(x => x === "session/load")).toHaveLength(3);
+    expect(calls.filter(x => x === "session/new")).toHaveLength(1);
+    expect(calls.filter(x => x === "session/prompt")).toHaveLength(1);
+  });
+});
+
+test("usage errors are actionable and a failed reconnect preserves the visible conversation", async () => {
+  await sharedFixture(true, async (bridge, root) => {
+    const a = await bridge.session(threadA);
+    await a.ready;
+    await a.act({ type: "prompt", text: "quota", requestId: "failed-turn" });
+    await until(() => a.snapshot.status === "error");
+    expect(a.snapshot.error).toContain("usage limit reached");
+    expect(a.snapshot.error).not.toContain("synthetic-private-detail");
+    const messages = structuredClone(a.snapshot.messages);
+    await writeFile(join(root, "fail-load"), "yes");
+    await a.act({ type: "connect" });
+    await a.ready;
+    expect(a.snapshot.status).toBe("error");
+    expect(a.snapshot.messages).toEqual(messages);
+    expect((await readFile(join(root, "requests"), "utf8")).split("\n").filter(x => x === "session/prompt")).toHaveLength(1);
+  });
+});
+
 test("shared bridge isolates routing and deletion", async () => {
   await sharedFixture(true, async (bridge) => {
     expect(bridge.activity()).toEqual({});

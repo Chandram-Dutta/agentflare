@@ -106,10 +106,25 @@ export function createUserBridge({
     c.permissions.clear();
     c.snapshot.permissions = [];
   };
-  const fail = (c, error) => {
+  const fail = (c, error, operation = "session") => {
     settle(c);
     c.snapshot.status = !dead && error?.code === -32000 ? "auth-required" : "error";
-    if (c.snapshot.status === "error") c.snapshot.error = "Codex could not continue. Reconnect to reload this session.";
+    const missing = typeof error?.data?.details === "string" && /no rollout found for thread id|thread not found:|thread not loaded:/.test(error.data.details);
+    const limited = error?.data?.codexErrorInfo === "usageLimitExceeded";
+    const reason = dead ? "connection-closed" : missing ? "session-missing" : limited ? "usage-limit" : c.snapshot.status === "auth-required" ? "auth-required" : "request-failed";
+    // Never log raw provider errors: their details can contain prompts or secrets.
+    console.error({ event: "codex_session_failed", operation, reason, code: Number.isFinite(error?.code) ? error.code : undefined });
+    if (c.snapshot.status === "error") c.snapshot.error = dead
+      ? "The Codex connection closed. Reconnect to reload this session."
+      : missing
+        ? "Codex could not find the saved session. Reconnect will retry loading it; your workspace files have not been deleted."
+        : limited
+          ? "Codex usage limit reached. Check your OpenAI account limits before reconnecting."
+          : operation === "load"
+            ? "Codex could not load this conversation. Reconnect to retry."
+            : operation === "prompt"
+              ? "Codex could not complete this turn. Reconnect to reload the conversation; the prompt will not be sent again automatically."
+              : "Codex could not open this session. Reconnect to retry.";
     else delete c.snapshot.error;
   };
   const failAll = () => {
@@ -213,12 +228,14 @@ export function createUserBridge({
     catch (e) { if (e.code !== "ENOENT") throw e; }
     c.currentMessage = undefined;
     let result;
+    c.openOperation = saved ? "load" : "new";
     if (saved) {
       c.sessionId = saved;
       routes.set(saved, c); // load may replay notifications before its response
+      const previousMessages = c.snapshot.messages;
       c.snapshot.messages = [];
       try { result = await agent.request(methods.agent.session.load, { sessionId: saved, cwd: c.cwd, mcpServers: [] }); }
-      catch (e) { routes.delete(saved); throw e; }
+      catch (e) { c.snapshot.messages = previousMessages; routes.delete(saved); throw e; }
     } else {
       result = await agent.request(methods.agent.session.new, { cwd: c.cwd, mcpServers: [] });
       c.freshSession = true;
@@ -248,7 +265,14 @@ export function createUserBridge({
   }
   async function act(c, action) {
     if (dead || c.deleted || loggingOut || quiescing) throw new Error("Disconnected");
-    if (action.type === "authenticate") {
+    if (action.type === "connect") {
+      // A live transport can contain an errored session. Retry only that session,
+      // never restart siblings, create a replacement history, or resubmit a turn.
+      if (c.snapshot.status !== "error") return;
+      c.snapshot.status = "connecting";
+      delete c.snapshot.error;
+      c.public.ready = init.then(() => open(c)).catch(e => fail(c, e, c.openOperation));
+    } else if (action.type === "authenticate") {
       if (c.snapshot.status !== "auth-required" && c.snapshot.status !== "authenticating") throw new Error("Not ready for login");
       void authenticate().catch(e => fail(c, e));
     } else if (action.type === "login-response") {
@@ -266,7 +290,7 @@ export function createUserBridge({
       boundContent(c.snapshot);
       c.currentMessage = undefined; c.snapshot.status = "running";
       c.prompt = agent.request(methods.agent.session.prompt, { sessionId: c.sessionId, prompt: content })
-        .then(() => { settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; onSettled(); }).catch((e) => fail(c, e));
+        .then(() => { settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; onSettled(); }).catch((e) => fail(c, e, "prompt"));
     } else if (action.type === "permission") {
       const p = c.permissions.get(action.id);
       if (!p || !p.options.some((x) => x.optionId === action.optionId)) throw new Error("Permission request expired or invalid choice");
@@ -298,7 +322,7 @@ export function createUserBridge({
     c.public = { snapshot: c.snapshot, act: (a) => act(c, a) };
     contexts.set(threadId, c);
     c.public.ready = init.then(() => open(c)).catch((e) => {
-      fail(c, e);
+      fail(c, e, c.openOperation);
       if (authentication && c.snapshot.status === "auth-required") {
         c.snapshot.status = "authenticating";
         if (login) c.snapshot.login = login;

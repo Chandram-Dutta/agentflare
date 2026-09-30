@@ -518,11 +518,7 @@ export class UserRuntime {
       await this.status(id);
       if (action && !["connect", "logout"].includes(action.type))
         await this.dirty();
-      const snapshot = await this.fetch(
-        id,
-        action && action.type !== "connect" ? "POST" : "GET",
-        action,
-      );
+      const snapshot = await this.fetch(id, action ? "POST" : "GET", action);
       if (action?.type === "logout") {
         // Native logout succeeded and rejected any busy-session race. Fence late
         // checkpoint requests before clearing durable credentials. The reset flag
