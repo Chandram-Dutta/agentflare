@@ -119,6 +119,7 @@ export class ThreadStateStore {
         status: snapshot.status,
         attention: snapshot.permissions.length > 0 || Boolean(snapshot.login),
         attentionId: snapshot.permissions[0]?.id ?? snapshot.login?.id,
+        turnCancelled: snapshot.turnCancelled,
         turn:
           snapshot.messages.findLast((m) => m.role === "user")?.id ??
           this.get(id).activity?.turn,
@@ -141,6 +142,8 @@ export class ThreadStateStore {
     });
   }
   private setActivity(id: string, activity: AcpActivity, live = true) {
+    // Historical transcripts are not observations of the running agent.
+    if (!live) return;
     this.activityVersions.set(id, (this.activityVersions.get(id) ?? 0) + 1);
     const previous = this.get(id);
     let kind = notificationKind(previous.activity, activity);
@@ -150,6 +153,7 @@ export class ThreadStateStore {
       this.finishedTurns.set(id, activity.turn);
     const finished =
       activity.status === "ready" &&
+      !activity.turnCancelled &&
       Boolean(activity.turn) &&
       (previous.activity?.turn !== activity.turn ||
         previous.activity?.status === "running");
@@ -158,12 +162,13 @@ export class ThreadStateStore {
         previous.activity?.status === activity.status &&
         previous.activity?.turn === activity.turn &&
         previous.activity?.attention === activity.attention &&
+        previous.activity?.turnCancelled === activity.turnCancelled &&
         previous.activity?.attentionId === activity.attentionId
           ? previous.activity
           : activity,
       unread: id === this.viewed ? false : previous.unread || finished,
     });
-    if (live && kind && this.notificationsEnabled)
+    if (kind && this.notificationsEnabled)
       for (const listener of this.notificationListeners)
         listener({ threadId: id, kind });
   }
@@ -255,9 +260,6 @@ export class ThreadStateStore {
         action,
       );
       if (this.versions.get(id) !== version) return false;
-      const cancelledTurn = this.get(id).activity?.turn;
-      if (action.type === "cancel" && cancelledTurn)
-        this.finishedTurns.set(id, cancelledTurn);
       this.accept(
         id,
         action.type === "connect" &&

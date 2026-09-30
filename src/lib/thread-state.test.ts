@@ -328,7 +328,9 @@ test("a stopped turn and a deleted thread don't send completion notifications", 
     a: { status: "running", attention: false, turn: "turn-1" },
   };
   const store = storeWith(async (_path, method) =>
-    method === "POST" ? { ...running, status: "ready" } : activity,
+    method === "POST"
+      ? { ...running, status: "ready", turnCancelled: true }
+      : activity,
   );
   store.setNotificationsEnabled(true);
   const events: ThreadNotification[] = [];
@@ -343,21 +345,46 @@ test("a stopped turn and a deleted thread don't send completion notifications", 
 });
 
 test("loading a saved transcript cannot notify for historical completion over live activity", async () => {
-  const store = storeWith(async (path) => {
-    if (path === "/activity")
-      return { a: { status: "running", attention: false, turn: "current" } };
-    if (path.endsWith("/status")) return runtime;
-    return {
-      ...ready,
-      saved: true,
-      messages: [{ id: "historical", role: "user", text: "old task" }],
-    };
-  });
+  for (const status of ["running", "ready"] as const) {
+    const store = storeWith(async (path) => {
+      if (path === "/activity")
+        return { a: { status, attention: false, turn: "current" } };
+      if (path.endsWith("/status")) return runtime;
+      return {
+        ...ready,
+        saved: true,
+        messages: [{ id: "historical", role: "user", text: "old task" }],
+      };
+    });
+    store.setNotificationsEnabled(true);
+    const events: ThreadNotification[] = [];
+    store.subscribeNotifications((event) => events.push(event));
+    await store.pollActivity();
+    await store.ensure("a");
+    expect(store.get("a").snapshot?.saved).toBe(true);
+    expect(store.get("a").activity).toMatchObject({ status, turn: "current" });
+    await store.pollActivity();
+    expect(events).toEqual([]);
+  }
+});
+
+test("another client's cancelled turn does not notify, but its next completed turn does", async () => {
+  let activity: AcpActivity = {
+    status: "running",
+    attention: false,
+    turn: "cancelled",
+  };
+  const store = storeWith(async () => ({ a: activity }));
   store.setNotificationsEnabled(true);
   const events: ThreadNotification[] = [];
   store.subscribeNotifications((event) => events.push(event));
   await store.pollActivity();
-  await store.ensure("a");
-  expect(store.get("a").snapshot?.saved).toBe(true);
+  activity = { ...activity, status: "ready", turnCancelled: true };
+  await store.pollActivity();
   expect(events).toEqual([]);
+  expect(store.get("a").unread).toBe(false);
+  activity = { status: "ready", attention: false, turn: "completed" };
+  await store.pollActivity();
+  await store.pollActivity();
+  expect(events).toEqual([{ threadId: "a", kind: "finished" }]);
 });

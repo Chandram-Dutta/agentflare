@@ -19,6 +19,7 @@ export function notificationKind(
     return "attention";
   if (
     !next.attention &&
+    !next.turnCancelled &&
     next.status === "ready" &&
     next.turn &&
     (previous.status === "running" || previous.turn !== next.turn)

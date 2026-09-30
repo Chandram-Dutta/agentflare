@@ -15,9 +15,11 @@ export type AcpActivity = {
   attention: boolean;
   attentionId?: string;
   turn?: string;
+  turnCancelled?: boolean;
 };
 
 export type AcpSnapshot = {
+  turnCancelled?: boolean;
   authScope?: "user";
   authPersistence?: "saved" | "pending";
   saved?: boolean;

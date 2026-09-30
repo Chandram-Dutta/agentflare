@@ -301,6 +301,23 @@ test("usage errors are actionable and a failed reconnect preserves the visible c
   });
 });
 
+test("cancellation is visible in snapshots and activity and resets for the next turn", async () => {
+  await sharedFixture(true, async (bridge) => {
+    const a = await bridge.session(threadA);
+    await a.ready;
+    await a.act({ type: "prompt", text: "inspect", requestId: "cancel-me" });
+    await until(() => a.snapshot.permissions.length === 1);
+    await a.act({ type: "cancel" });
+    await until(() => a.snapshot.status === "ready");
+    expect(a.snapshot.turnCancelled).toBe(true);
+    expect(bridge.activity()[threadA]).toMatchObject({ turn: "cancel-me", turnCancelled: true });
+    await a.act({ type: "prompt", text: "rich", requestId: "complete-me" });
+    await until(() => a.snapshot.status === "ready");
+    expect(a.snapshot.turnCancelled).toBeUndefined();
+    expect(bridge.activity()[threadA]).toEqual({ status: "ready", attention: false, turn: "complete-me" });
+  });
+});
+
 test("shared bridge isolates routing and deletion", async () => {
   await sharedFixture(true, async (bridge) => {
     expect(bridge.activity()).toEqual({});
