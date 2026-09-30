@@ -5,6 +5,7 @@ import { useTheme } from "next-themes";
 import { Panel, Separator } from "react-resizable-panels";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { File, PatchDiff } from "@pierre/diffs/react";
+import { AcpConversation } from "./acp-conversation";
 import { TerminalPreview } from "./terminal-preview";
 import { Button } from "./ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
@@ -54,7 +55,7 @@ export function RuntimeWorkspace({
       <Panel id={`${projectId}-terminal`} defaultSize="36%" minSize="300px">
         <main
           className="flex h-full min-w-0 flex-col overflow-auto"
-          aria-label="Thread terminal"
+          aria-label="Thread agent"
         >
           {children(Boolean(state?.started))}
           {error && (
@@ -63,22 +64,27 @@ export function RuntimeWorkspace({
             </p>
           )}
           {state?.started && threadId ? (
-            <TerminalPreview threadId={threadId} />
+            state.agent === "codex" ? (
+              <AcpConversation key={threadId} threadId={threadId} />
+            ) : (
+              <TerminalPreview threadId={threadId} />
+            )
           ) : (
             <div className="flex-1 bg-[var(--terminal)] p-6 text-xs">
               <p>
                 {!threadId
-                  ? "Create a thread to choose a CLI agent."
+                  ? "Create a thread to start a Codex workspace."
                   : pending
                     ? "Starting sandbox and checking out repository…"
-                    : "Start this thread to open its CLI agent."}
+                    : "Start this thread to open its Codex workspace."}
               </p>
               {threadId && (
                 <p className="mt-3 max-w-lg leading-5 text-muted-foreground">
-                  Sign in to the agent inside its terminal. Sandbox files are
-                  temporary and may be lost after 30 minutes idle or a container
-                  restart. Export important work before leaving; thread metadata
-                  is not a backup. Git push credentials are not connected yet.
+                  Sign in to Codex from the conversation after startup. Sandbox
+                  files are temporary and may be lost after 30 minutes idle or a
+                  container restart. Export important work before leaving;
+                  thread metadata is not a backup. Git push credentials are not
+                  connected yet.
                 </p>
               )}
               {threadId && (
@@ -97,7 +103,7 @@ export function RuntimeWorkspace({
       </Panel>
       <Separator
         className="workspace-divider"
-        aria-label="Resize agent CLI and file view"
+        aria-label="Resize agent conversation and file view"
       />
       <RepositoryInspector
         base={base}

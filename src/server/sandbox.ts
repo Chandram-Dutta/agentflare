@@ -1,4 +1,5 @@
 import { Sandbox } from "@cloudflare/sandbox";
+import type { AcpAction, AcpSnapshot } from "@/lib/acp";
 import { shellArgument, type RuntimeState } from "@/lib/runtime";
 import type { AgentId } from "@/lib/workspace";
 
@@ -12,6 +13,7 @@ type StartInput = {
 
 export class ThreadSandbox extends Sandbox {
   private starting?: Promise<RuntimeState>;
+  private startingAcp?: Promise<AcpSnapshot>;
   private startStage = "checking workspace";
   sleepAfter = "30m";
 
@@ -134,5 +136,88 @@ export class ThreadSandbox extends Sandbox {
         "Repository operation failed. The path may be missing, binary, too large, or outside the checkout.",
       );
     return JSON.parse(result.stdout);
+  }
+
+  private disconnectedAcp(): AcpSnapshot {
+    return { status: "disconnected", messages: [], permissions: [] };
+  }
+
+  async acpSnapshot(): Promise<AcpSnapshot> {
+    const state = await this.workspaceStatus();
+    if (!state.started || state.agent !== "codex")
+      return this.disconnectedAcp();
+    await this.requireWorkspace();
+    const process = await this.getProcess("agentflare-acp");
+    if (!process || !["starting", "running"].includes(process.status))
+      return this.disconnectedAcp();
+    try {
+      return await this.fetchAcp("GET");
+    } catch {
+      return {
+        ...this.disconnectedAcp(),
+        status: "error",
+        error: "The Codex bridge stopped. Connect again.",
+      };
+    }
+  }
+
+  async acpAction(action: AcpAction): Promise<AcpSnapshot> {
+    const state = await this.workspaceStatus();
+    if (!state.started) throw new Error("Start this thread first.");
+    if (state.agent !== "codex")
+      throw new Error("This thread does not use Codex.");
+    await this.requireWorkspace();
+    if (action.type === "connect") return this.startAcp();
+    const process = await this.getProcess("agentflare-acp");
+    if (!process || !["starting", "running"].includes(process.status))
+      throw new Error("Connect Codex first.");
+    return this.fetchAcp("POST", action);
+  }
+
+  private async startAcp(): Promise<AcpSnapshot> {
+    if (this.startingAcp) return this.startingAcp;
+    this.startingAcp = (async () => {
+      const existing = await this.getProcess("agentflare-acp");
+      if (existing && ["starting", "running"].includes(existing.status)) {
+        try {
+          const snapshot = await this.fetchAcp("GET");
+          if (snapshot.status !== "error") return snapshot;
+        } catch {}
+        await this.killProcess("agentflare-acp").catch(() => {});
+      }
+      await this.startProcess("bun /opt/agentflare/acp/bridge.mjs", {
+        processId: "agentflare-acp",
+        autoCleanup: false,
+      });
+      for (let attempt = 0; attempt < 30; attempt++) {
+        try {
+          return await this.fetchAcp("GET");
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw new Error("Codex bridge did not become ready.");
+    })();
+    try {
+      return await this.startingAcp;
+    } finally {
+      this.startingAcp = undefined;
+    }
+  }
+
+  private async fetchAcp(
+    method: "GET" | "POST",
+    action?: AcpAction,
+  ): Promise<AcpSnapshot> {
+    const response = await this.containerFetch(
+      "http://127.0.0.1/acp",
+      {
+        method,
+        headers: { "Content-Type": "application/json" },
+        ...(action ? { body: JSON.stringify(action) } : {}),
+      },
+      8766,
+    );
+    if (!response.ok) throw new Error("Codex bridge request failed.");
+    return (await response.json()) as AcpSnapshot;
   }
 }

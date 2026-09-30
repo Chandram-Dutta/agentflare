@@ -3,3 +3,7 @@
 !sandbox/
 !sandbox/repository.mjs
 !sandbox/launch-agent.sh
+!sandbox/acp/
+!sandbox/acp/package.json
+!sandbox/acp/package-lock.json
+!sandbox/acp/bridge.mjs

@@ -123,10 +123,11 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
   const thread = (await (
     await request(`/projects/${created.id}/threads`, "POST", {
       name: "task",
-      agent: "claude",
+      agent: "codex",
     })
   ).json()) as Thread;
   for (const operation of [
+    "acp",
     "status",
     "terminal",
     "files",
@@ -165,6 +166,52 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
   expect((await request(`/threads/${thread.id}/runtime/status`)).status).toBe(
     503,
   );
+  expect(
+    (
+      await request(
+        `/threads/${thread.id}/runtime/acp`,
+        "POST",
+        { type: "prompt", text: "x", requestId: "foreign" },
+        "bob",
+      )
+    ).status,
+  ).toBe(404);
+  expect(
+    (
+      await request(`/threads/${thread.id}/runtime/acp`, "POST", {
+        type: "prompt",
+        text: "",
+        requestId: "bad",
+        cwd: "/tmp",
+      })
+    ).status,
+  ).toBe(400);
+  for (const [length, status] of [
+    [16000, 503],
+    [16001, 400],
+    [100001, 413],
+  ]) {
+    expect(
+      (
+        await request(`/threads/${thread.id}/runtime/acp`, "POST", {
+          type: "prompt",
+          text: "x".repeat(length),
+          requestId: "boundary",
+        })
+      ).status,
+    ).toBe(status);
+  }
+  expect(
+    (
+      await request(
+        `/threads/${thread.id}/runtime/acp`,
+        "POST",
+        { type: "connect" },
+        "alice",
+        { origin: "https://evil.test" },
+      )
+    ).status,
+  ).toBe(403);
 });
 
 async function createProject(user = "alice"): Promise<Project> {

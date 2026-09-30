@@ -1,7 +1,7 @@
 # Agentflare
 
-Terminal-first development workspaces. Choose a repository and coding CLI; use the
-agent's native terminal UI instead of a platform-specific chat wrapper.
+Development workspaces with Codex over ACP: threads, agent conversation,
+file/diff view, and Files/Git navigation in resizable panes.
 
 ## Current milestone
 
@@ -11,23 +11,39 @@ A persistent, authenticated workspace with an initial Cloudflare Sandbox runtime
 - TypeScript, Bun, Tailwind, shadcn/ui, and Hono.
 - GitHub sign-in through Better Auth; closed-by-default GitHub account allowlist.
 - D1/Drizzle projects and threads, private to their owner and saved across reloads.
-- Project tabs, per-project threads, a center terminal and a Files/Git stage inspector.
-- Monospace light/dark workspace with an xterm.js terminal renderer.
+- Project tabs, per-project threads, a Codex conversation and a Files/Git stage inspector.
+- Monospace light/dark workspace; existing Claude threads retain their legacy terminal.
 - Server-side ownership checks, exact-origin write protection and stale-edit detection.
 
 Each started thread checks user and GitHub App repository access, clones into its
-own sandbox/branch, and opens Claude Code or Codex in a native PTY. xterm.js carries
-binary WebSocket input/output and resize messages. Reconnecting attaches to the
-same live agent. Files and Git stage use Pierre Trees/Diffs with actual repository
-data; use refresh after agent edits. Stage and commit through the CLI.
+own sandbox/branch. New threads default to Codex through the pinned ACP adapter.
+The sandbox bridge owns the conversation and pending approvals, so browser reloads
+do not restart a turn. The UI polls snapshots once per second; this is not yet a
+push-streaming transport. Files and Git stage use Pierre Trees/Diffs with actual
+repository data; use refresh after agent edits. Ask Codex to stage and commit.
 
 **Experimental: sandbox disk and agent login state are ephemeral.** After 30 minutes
 idle or a container restart they can be lost; saved thread metadata is not a backup.
 No R2 checkpoints or publish operation yet. Clone credentials are short-lived and
 read-only, not left in Git configuration. Native `git push` requires your own
 repository credentials until controlled publishing is implemented. Do not entrust
-unexported work to this initial runtime. Authenticate the agent through its native
-CLI; browser-local OAuth callbacks may require its remote/device login option.
+unexported work to this initial runtime.
+
+### Codex sign-in
+
+Start a Codex thread, choose **Sign in with ChatGPT**, open the OpenAI link and
+enter the displayed device code. Enable device-code authorization in your ChatGPT
+settings if OpenAI requires it. This uses Codex's native subscription login, not
+Agentflare's own subscription-sharing OAuth registration. No OpenAI client secret
+or API key is needed by the operator.
+
+Credentials remain in that sandbox's Codex home and never go to the browser.
+They survive browser reloads, but **not guaranteed container replacement**. Log
+in separately per sandbox; Agentflare does not copy rotating refresh tokens
+between threads. Reconnecting a surviving sandbox reloads the saved ACP session;
+a failed load is reported rather than silently starting a new conversation.
+Approvals require an explicit choice; Stop cancels the current turn. Signing out
+of Codex does not delete the conversation. This is separate from GitHub sign-out.
 
 ## Development
 
@@ -139,9 +155,10 @@ GitHub, provision Cloudflare resources or add a development authentication bypas
 
 ## Runtime checks and remaining work
 
-The application owns identity, repository access, credentials, provisioning,
-terminal transport, checkpoints and code review. The CLI owns its conversation,
-tools, menus and permission prompts. No output parsing is needed to show its UI.
+The application owns identity, repository access, provisioning and code review.
+For Codex it renders structured ACP messages and explicit permission choices;
+the adapter and Codex own model/tool execution and native authentication. The
+legacy terminal path remains only for existing Claude threads.
 
 The repository UI uses [`@pierre/trees`](https://trees.software/docs) for file
 navigation and [`@pierre/diffs`](https://diffs.com/docs) for file/diff rendering.
@@ -155,6 +172,13 @@ perform stage/unstage operations or provide filesystem authorization.
 path/symlink escapes, literal Git pathspecs, renames, and index versus working-tree
 diffs. GitHub token tests mock GitHub, verify the App signature, and ensure user
 access denial stops before using App authority.
+
+ACP tests use the real SDK with a scripted subprocess (no provider credentials)
+to verify device-login completion, streamed text, deny/allow boundaries, prompt
+deduplication, cancellation, process death, and saved-session replay. The container
+installs its own pinned ACP dependencies from `sandbox/acp/package-lock.json`.
+These tests do not establish real subscription entitlement or live Cloudflare
+container connectivity; those need an authenticated end-to-end smoke check.
 
 For a Docker-backed runtime smoke check, run this **local-only** fixture (never
 deploy it):
@@ -192,7 +216,8 @@ controlled publishing, agent restart/stop UX, and per-user runtime budgets.
 **Publishing must be enforced at the credential boundary.** A confirmation button
 cannot prevent a native CLI from running `git push` if its sandbox already holds
 write credentials. Use read-only repository access in the workspace and a
-separate, authorized publishing operation. Agent permission prompts remain native.
+separate, authorized publishing operation. ACP permissions are not a substitute
+for scoped repository credentials.
 
 Sandbox disk is ephemeral. Checkpoint files and supported agent session state;
 never promise process-memory recovery or preservation beyond the last checkpoint.

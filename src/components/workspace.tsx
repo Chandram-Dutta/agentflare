@@ -344,7 +344,7 @@ function ProjectWorkspace({
       const result = await apiRequest<Thread>(
         `/projects/${project.id}/threads`,
         "POST",
-        { name: `thread ${threads.length + 1}`, agent: "claude" },
+        { name: `thread ${threads.length + 1}`, agent: "codex" },
       );
       onThreadSave(result);
       setSelected(result.id);
@@ -427,7 +427,7 @@ function ProjectWorkspace({
         </Panel>
         <Separator
           className="workspace-divider"
-          aria-label="Resize threads and agent CLI"
+          aria-label="Resize threads and agent conversation"
         />
         <RuntimeWorkspace
           key={thread?.id ?? "empty"}
@@ -443,7 +443,9 @@ function ProjectWorkspace({
                 started={started}
               />
             ) : (
-              <div className="h-10 border-b px-3 py-3 text-xs">agent CLI</div>
+              <div className="h-10 border-b px-3 py-3 text-xs">
+                agent conversation
+              </div>
             )
           }
         </RuntimeWorkspace>
@@ -494,7 +496,7 @@ function ThreadControls({
       >
         <div className="flex min-w-0 basis-full items-center gap-2 sm:flex-1 sm:basis-auto">
           <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
-            terminal /
+            {thread.agent === "codex" ? "conversation /" : "terminal /"}
           </span>
           <Input
             aria-label="Thread name"
@@ -513,11 +515,10 @@ function ThreadControls({
           onChange={(event) => setAgent(event.target.value as AgentId)}
           className="h-7 max-w-full border bg-background px-2 text-xs outline-offset-2 focus-visible:outline-primary"
         >
-          {Object.entries(agents).map(([key, item]) => (
-            <option key={key} value={key}>
-              {item.name}
-            </option>
-          ))}
+          {thread.agent === "claude" && (
+            <option value="claude">{agents.claude.name}</option>
+          )}
+          <option value="codex">{agents.codex.name}</option>
         </select>
         {dirty && (
           <Button

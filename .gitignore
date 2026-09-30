@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+/sandbox/acp/node_modules/
 /.pnp
 .pnp.*
 .yarn/*

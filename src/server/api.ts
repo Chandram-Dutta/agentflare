@@ -19,6 +19,7 @@ import { account } from "./db/auth-schema";
 import { project, thread } from "./db/workspace-schema";
 import { repositoryCloneToken } from "./github";
 import { repositoryPath } from "@/lib/runtime";
+import type { AcpAction } from "@/lib/acp";
 import type { ThreadSandbox } from "./sandbox";
 
 export const api = new Hono<{
@@ -165,39 +166,48 @@ api.get("/session", async (c) => {
 });
 
 // All routes below require both a valid session and current operator admission.
-api.use("*", bodyLimit({ maxSize: 4096 }), async (c, next) => {
-  if (!installationReady(c.env))
-    return c.json({ error: "Installation setup is required." }, 503);
-  if (
-    !["GET", "HEAD"].includes(c.req.method) &&
-    c.req.header("Origin") !== c.env.BETTER_AUTH_URL
-  ) {
-    return c.json({ error: "Origin is not allowed." }, 403);
-  }
-  const session = await createAuth(c.env).api.getSession({
-    headers: c.req.raw.headers,
-  });
-  if (!session) return c.json({ error: "Sign in to continue." }, 401);
-  const db = drizzle(c.env.DB!);
-  const identity = await db
-    .select({ id: account.accountId })
-    .from(account)
-    .where(
-      and(
-        eq(account.userId, session.user.id),
-        eq(account.providerId, "github"),
-      ),
-    )
-    .get();
-  if (!identity || !allowedGitHubIds(c.env).has(identity.id))
-    return c.json(
-      { error: "This account is not allowed on this installation." },
-      403,
-    );
-  c.set("user", { id: session.user.id, name: session.user.name });
-  c.set("db", db);
-  await next();
-});
+api.use(
+  "*",
+  (c, next) =>
+    bodyLimit({
+      maxSize: /^\/api\/threads\/[^/]+\/runtime\/acp$/.test(c.req.path)
+        ? 100000
+        : 4096,
+    })(c, next),
+  async (c, next) => {
+    if (!installationReady(c.env))
+      return c.json({ error: "Installation setup is required." }, 503);
+    if (
+      !["GET", "HEAD"].includes(c.req.method) &&
+      c.req.header("Origin") !== c.env.BETTER_AUTH_URL
+    ) {
+      return c.json({ error: "Origin is not allowed." }, 403);
+    }
+    const session = await createAuth(c.env).api.getSession({
+      headers: c.req.raw.headers,
+    });
+    if (!session) return c.json({ error: "Sign in to continue." }, 401);
+    const db = drizzle(c.env.DB!);
+    const identity = await db
+      .select({ id: account.accountId })
+      .from(account)
+      .where(
+        and(
+          eq(account.userId, session.user.id),
+          eq(account.providerId, "github"),
+        ),
+      )
+      .get();
+    if (!identity || !allowedGitHubIds(c.env).has(identity.id))
+      return c.json(
+        { error: "This account is not allowed on this installation." },
+        403,
+      );
+    c.set("user", { id: session.user.id, name: session.user.name });
+    c.set("db", db);
+    await next();
+  },
+);
 
 const projectFields = {
   id: project.id,
@@ -353,6 +363,70 @@ api.patch("/threads/:id", async (c) => {
       409,
     );
   return c.json(result);
+});
+
+const acpAction = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("connect") }),
+  z.strictObject({ type: z.literal("authenticate") }),
+  z.strictObject({
+    type: z.literal("prompt"),
+    text: z.string().trim().min(1).max(16000),
+    requestId: z.string().min(1).max(128),
+  }),
+  z.strictObject({ type: z.literal("cancel") }),
+  z.strictObject({
+    type: z.literal("permission"),
+    id: z.string().min(1).max(256),
+    optionId: z.string().min(1).max(256),
+  }),
+  z.strictObject({
+    type: z.literal("login-response"),
+    id: z.string().min(1).max(256),
+    action: z.enum(["accept", "cancel"]),
+  }),
+  z.strictObject({ type: z.literal("logout") }),
+]);
+
+// Ownership and the global origin/session gates run before a sandbox stub is obtained.
+api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
+  const owned = await c
+    .get("db")
+    .select({ id: thread.id, agent: thread.agent })
+    .from(thread)
+    .innerJoin(project, eq(thread.projectId, project.id))
+    .where(
+      and(
+        eq(thread.id, c.req.param("id")),
+        eq(project.ownerId, c.get("user").id),
+      ),
+    )
+    .get();
+  if (!owned) return c.notFound();
+  if (owned.agent !== "codex")
+    return c.json({ error: "This thread does not use Codex." }, 409);
+  let action: AcpAction | undefined;
+  if (c.req.method === "POST") {
+    const parsed = acpAction.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "Invalid ACP action." }, 400);
+    action = parsed.data;
+  }
+  if (!c.env.Sandboxes)
+    return c.json(
+      { error: "The operator must configure Cloudflare Containers." },
+      503,
+    );
+  const { getSandbox } = await import("@cloudflare/sandbox");
+  const sandbox = getSandbox<ThreadSandbox>(c.env.Sandboxes, owned.id);
+  try {
+    return c.json(
+      action ? await sandbox.acpAction(action) : await sandbox.acpSnapshot(),
+    );
+  } catch {
+    return c.json(
+      { error: "Codex is unavailable. Start the workspace and connect again." },
+      409,
+    );
+  }
 });
 
 // Resolve ownership before obtaining a Durable Object or contacting GitHub.
