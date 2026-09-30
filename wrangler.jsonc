@@ -17,6 +17,9 @@
     "bindings": [{ "name": "Sandboxes", "class_name": "ThreadSandbox" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ThreadSandbox"] }],
+  // Create this private bucket before deployment; do not add expiration rules.
+  "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "agentflare-workspaces" }],
+  "vars": { "BACKUP_BUCKET_NAME": "agentflare-workspaces" },
   "d1_databases": [
     {
       "binding": "DB",
@@ -46,11 +49,13 @@
         { "pattern": "agentflare.onlychan.xyz", "custom_domain": true }
       ],
       "vars": {
+        "BACKUP_BUCKET_NAME": "agentflare-workspaces",
         "BETTER_AUTH_URL": "https://agentflare.onlychan.xyz",
         "GITHUB_CLIENT_ID": "Iv23liBzGNYd1ZpDKH0e",
         "GITHUB_APP_ID": "5124431",
         "ALLOWED_GITHUB_IDS": "81961406"
       },
+      "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "agentflare-workspaces" }],
       "d1_databases": [
         {
           "binding": "DB",

@@ -19,6 +19,12 @@ export type AcpActivity = {
 export type AcpSnapshot = {
   authScope?: "user";
   authPersistence?: "saved" | "pending";
+  saved?: boolean;
+  interrupted?: boolean;
+  persistence?: {
+    state: "saved" | "saving" | "error" | "disabled";
+    savedAt?: string;
+  };
   status:
     | "disconnected"
     | "connecting"

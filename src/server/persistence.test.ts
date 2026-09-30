@@ -135,6 +135,7 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
   ).json()) as Thread;
   for (const operation of [
     "acp",
+    "saved",
     "status",
     "terminal",
     "files",
@@ -434,6 +435,80 @@ test("activity only exposes owned shared threads and never calls a startup metho
       [own.id]: { status: "running", attention: false, turn: "own-turn" },
     });
     expect(calls).toBe(1);
+  } finally {
+    delete env.Sandboxes;
+  }
+});
+
+test("saved history requires ownership and never calls a startup method", async () => {
+  const thread = await createThread((await createProject()).id);
+  let calls = 0;
+  env.Sandboxes = {
+    idFromName: (name: string) => name,
+    get: () => ({
+      userSaved: async (id: string) => {
+        expect(id).toBe(thread.id);
+        calls++;
+        return {
+          status: "disconnected",
+          saved: true,
+          messages: [],
+          permissions: [],
+        };
+      },
+    }),
+  } as unknown as NonNullable<Bindings["Sandboxes"]>;
+  try {
+    const path = `/threads/${thread.id}/runtime/saved`;
+    expect(
+      (await request(path, "GET", undefined, "alice", { cookie: "" })).status,
+    ).toBe(401);
+    expect((await request(path, "GET", undefined, "bob")).status).toBe(404);
+    expect(calls).toBe(0);
+    const response = await request(path);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({ saved: true });
+    expect(calls).toBe(1);
+  } finally {
+    delete env.Sandboxes;
+  }
+});
+
+test("workspace checkpoint callback rejects browser cookies and stale capabilities", async () => {
+  const id = "a".repeat(64);
+  const token = "b".repeat(72);
+  let calls = 0;
+  env.Sandboxes = {
+    idFromString: (value: string) => {
+      expect(value).toBe(id);
+      return value;
+    },
+    get: () => ({
+      saveRuntimeCheckpoint: async (value: string) => {
+        calls++;
+        return value === token ? { saved: true } : false;
+      },
+    }),
+  } as unknown as NonNullable<Bindings["Sandboxes"]>;
+  try {
+    const path = `/runtime-checkpoint/${id}`;
+    expect((await request(path, "POST", {})).status).toBe(401);
+    expect(calls).toBe(0);
+    expect(
+      (
+        await request(path, "POST", {}, "alice", {
+          Authorization: `Bearer ${"c".repeat(72)}`,
+        })
+      ).status,
+    ).toBe(401);
+    const response = await request(path, "POST", {}, "alice", {
+      cookie: "",
+      Authorization: `Bearer ${token}`,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ saved: true });
+    expect(calls).toBe(2);
   } finally {
     delete env.Sandboxes;
   }

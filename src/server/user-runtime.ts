@@ -1,4 +1,4 @@
-import type { Sandbox } from "@cloudflare/sandbox";
+import type { DirectoryBackup, Sandbox } from "@cloudflare/sandbox";
 import type { DurableObjectStorage } from "@cloudflare/workers-types";
 import type { Bindings } from "./env";
 import type { AcpAction, AcpSnapshot } from "@/lib/acp";
@@ -24,19 +24,156 @@ export type UserStart = {
   cloneToken: string;
 };
 const processId = "agentflare-user-acp";
-
+const backupTtl = 3_153_600_000; // 100 years. The R2 bucket must not expire backups/ via lifecycle rules.
+type Persistence = {
+  state: "saved" | "saving" | "error" | "disabled";
+  savedAt?: string;
+};
+type SavedSnapshot = AcpSnapshot & {
+  persistence: Persistence;
+  interrupted?: boolean;
+};
+type BackupPointer = {
+  backup: DirectoryBackup;
+  savedAt: string;
+  digest: string;
+};
 export class UserRuntime {
   private starting = new Map<string, Promise<RuntimeState>>();
   private publishing = new Map<string, Promise<PublishResult>>();
   private connecting?: Promise<void>;
   private signingOut = false;
   private authWrites: Promise<unknown> = Promise.resolve();
+  private operations: Promise<unknown> = Promise.resolve();
+  private snapshotDigests = new Map<string, string>();
   constructor(
     private sandbox: Sandbox<Bindings>,
     private storage: DurableObjectStorage,
     private env: Bindings,
     private identity: string,
   ) {}
+
+  private serialized<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.operations.then(fn, fn);
+    this.operations = next.catch(() => {});
+    return next;
+  }
+  private persistenceConfigured() {
+    const env = this.env;
+    return !!(
+      env.BACKUP_BUCKET &&
+      env.BACKUP_BUCKET_NAME &&
+      env.R2_ACCESS_KEY_ID &&
+      env.R2_SECRET_ACCESS_KEY &&
+      env.CLOUDFLARE_R2_ACCOUNT_ID
+    );
+  }
+  private async snapshotKey(id: string) {
+    const bytes = new TextEncoder().encode(`${this.identity}:${id}`);
+    const hash = await crypto.subtle.digest("SHA-256", bytes);
+    return `runtime-snapshots/${[...new Uint8Array(hash)].map((n) => n.toString(16).padStart(2, "0")).join("")}.json`;
+  }
+  private async saveSnapshot(id: string, snapshot: AcpSnapshot) {
+    if (!this.persistenceConfigured()) return;
+    if (!snapshot.messages.length && snapshot.status !== "ready") return;
+    // Never retain device-login URLs, permissions or native credentials in history.
+    const value = JSON.stringify({
+      status: snapshot.status,
+      messages: snapshot.messages,
+      truncated: snapshot.truncated,
+      contextUsage: snapshot.contextUsage,
+      configOptions: snapshot.configOptions,
+    });
+    const digest = Buffer.from(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
+    ).toString("hex");
+    if (this.snapshotDigests.get(id) === digest) return;
+    await this.env.BACKUP_BUCKET!.put(await this.snapshotKey(id), value, {
+      httpMetadata: { contentType: "application/json" },
+    });
+    this.snapshotDigests.set(id, digest);
+  }
+  private async persistence(): Promise<Persistence> {
+    if (!this.persistenceConfigured()) return { state: "disabled" };
+    const pointer = await this.storage.get<BackupPointer>("runtime-backup");
+    const revision = String(
+      (await this.storage.get<number>("workspace-revision")) ?? 0,
+    );
+    return {
+      state: (await this.storage.get("checkpoint-error"))
+        ? "error"
+        : pointer?.digest === revision
+          ? "saved"
+          : "saving",
+      savedAt: pointer?.savedAt,
+    };
+  }
+  private async dirty() {
+    await this.storage.put(
+      "workspace-revision",
+      ((await this.storage.get<number>("workspace-revision")) ?? 0) + 1,
+    );
+  }
+  async userSaved(id: string): Promise<SavedSnapshot> {
+    this.root(id);
+    if (await this.storage.get(`deleted:${id}`))
+      throw Error("This thread's sandbox has been deleted.");
+    if (!this.persistenceConfigured())
+      return {
+        status: "disconnected",
+        messages: [],
+        permissions: [],
+        persistence: { state: "disabled" },
+      };
+    const object = await this.env.BACKUP_BUCKET!.get(
+      await this.snapshotKey(id),
+    );
+    if (!object)
+      return {
+        status: "disconnected",
+        messages: [],
+        permissions: [],
+        saved: true,
+        persistence: await this.persistence(),
+      };
+    const saved = (await object.json()) as SavedSnapshot;
+    const interrupted = [
+      "running",
+      "configuring",
+      "connecting",
+      "authenticating",
+    ].includes(saved.status);
+    return {
+      ...saved,
+      saved: true,
+      persistence: await this.persistence(),
+      status: "disconnected",
+      interrupted,
+      login: undefined,
+      permissions: [],
+      messages: saved.messages,
+    };
+  }
+
+  private async restoreIfFresh() {
+    if (!this.persistenceConfigured()) return;
+    const exists = await this.sandbox.exec("test -d /workspace/threads");
+    if (exists.success && !(await this.storage.get("restore-pending"))) return;
+    const pointer = await this.storage.get<BackupPointer>("runtime-backup");
+    if (!pointer) return;
+    await this.storage.put("restore-pending", true);
+    const result = await this.sandbox.restoreBackup(pointer.backup);
+    if (!result.success) throw Error("Saved workspace restoration failed.");
+    const deleted = await this.storage.list({ prefix: "deleted:" });
+    for (const key of deleted.keys()) {
+      const id = key.slice("deleted:".length);
+      const removed = await this.sandbox.exec(
+        `rm -rf -- ${quote(this.root(id))}`,
+      );
+      if (!removed.success) throw Error("Deleted workspace cleanup failed.");
+    }
+    await this.storage.delete("restore-pending");
+  }
 
   private root(id: string) {
     if (
@@ -60,6 +197,7 @@ export class UserRuntime {
   private async require(id: string) {
     const state = await this.status(id);
     if (!state.started) throw Error("Start this thread first.");
+    await this.restoreIfFresh();
     if (
       !(
         await this.sandbox.exec(
@@ -68,12 +206,21 @@ export class UserRuntime {
       ).success
     )
       throw Error(
-        "Sandbox files are no longer available. Create a new thread. Checkpoints are not implemented yet.",
+        this.persistenceConfigured()
+          ? "Sandbox files are unavailable and the saved workspace could not be restored."
+          : "Sandbox files are no longer available because workspace persistence is disabled.",
       );
   }
-  async start(id: string, input: UserStart): Promise<RuntimeState> {
+  start(id: string, input: UserStart): Promise<RuntimeState> {
+    return this.serialized(() => this.startUnlocked(id, input));
+  }
+  private async startUnlocked(
+    id: string,
+    input: UserStart,
+  ): Promise<RuntimeState> {
     if (this.starting.has(id)) return this.starting.get(id)!;
     const pending = (async () => {
+      await this.restoreIfFresh();
       const previous = await this.status(id);
       if (previous.started) {
         await this.require(id);
@@ -106,6 +253,9 @@ export class UserRuntime {
         baseBranch: ref.slice(7),
       };
       await this.storage.put(`workspace:${id}`, state);
+      await this.dirty();
+      // Preserve even the initial checkout before a bridge has been started.
+      await this.checkpointUnlocked().catch(() => {});
       return state;
     })();
     this.starting.set(id, pending);
@@ -115,7 +265,17 @@ export class UserRuntime {
       this.starting.delete(id);
     }
   }
-  async inspect(id: string, operation: string, path = "", staged = false) {
+  inspect(id: string, operation: string, path = "", staged = false) {
+    return this.serialized(() =>
+      this.inspectUnlocked(id, operation, path, staged),
+    );
+  }
+  private async inspectUnlocked(
+    id: string,
+    operation: string,
+    path = "",
+    staged = false,
+  ) {
     await this.require(id);
     const state = (await this.storage.get<Workspace>(`workspace:${id}`))!;
     const input = Buffer.from(
@@ -129,7 +289,10 @@ export class UserRuntime {
     return JSON.parse(result.stdout);
   }
   async review(id: string): Promise<BranchReview> {
-    const review = await this.inspect(id, "review");
+    return this.serialized(() => this.reviewUnlocked(id));
+  }
+  private async reviewUnlocked(id: string): Promise<BranchReview> {
+    const review = await this.inspectUnlocked(id, "review");
     const state = (await this.storage.get<Workspace>(`workspace:${id}`))!;
     return {
       ...review,
@@ -138,14 +301,20 @@ export class UserRuntime {
         ?.result,
     };
   }
-  async publish(
+  publish(
+    id: string,
+    input: PublishInput & { branch: string; token: string },
+  ): Promise<PublishResult> {
+    return this.serialized(() => this.publishUnlocked(id, input));
+  }
+  private async publishUnlocked(
     id: string,
     input: PublishInput & { branch: string; token: string },
   ): Promise<PublishResult> {
     if (this.publishing.has(id))
       throw Error("Publishing is already in progress.");
     const pending = (async () => {
-      const snapshot = await this.inspect(id, "snapshot");
+      const snapshot = await this.inspectUnlocked(id, "snapshot");
       const state = (await this.storage.get<Workspace>(`workspace:${id}`))!;
       return publishSnapshot({
         ...input,
@@ -163,20 +332,36 @@ export class UserRuntime {
       this.publishing.delete(id);
     }
   }
-  async delete(id: string) {
+  delete(id: string) {
+    return this.serialized(() => this.deleteUnlocked(id));
+  }
+  private async deleteUnlocked(id: string) {
     const root = this.root(id);
     await this.storage.put(`deleted:${id}`, true);
+    await this.restoreIfFresh();
+    if (this.persistenceConfigured())
+      await this.env.BACKUP_BUCKET!.delete(await this.snapshotKey(id));
     await Promise.allSettled([
       this.starting.get(id),
       this.publishing.get(id),
       this.connecting,
     ]);
     const process = await this.sandbox.getProcess(processId);
-    if (process && ["running", "starting"].includes(process.status))
-      await this.fetch(id, "DELETE");
+    if (process && ["running", "starting"].includes(process.status)) {
+      const health = await this.sandbox.containerFetch(
+        "http://127.0.0.1/health",
+        {},
+        8766,
+      );
+      if (health.ok) await this.fetch(id, "DELETE");
+    }
     const result = await this.sandbox.exec(`rm -rf -- ${quote(root)}`);
     if (!result.success) throw Error("Workspace cleanup failed.");
     await this.storage.delete([`workspace:${id}`, `publish:${id}`]);
+    this.snapshotDigests.delete(id);
+    await this.dirty();
+    // A new consistent archive prevents an older archive resurrecting this thread.
+    await this.checkpointUnlocked().catch(() => {});
   }
 
   // Only the private container checkpoint capability may write credentials.
@@ -213,6 +398,7 @@ export class UserRuntime {
   private async connect() {
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
+      await this.restoreIfFresh();
       let running = await this.sandbox.getProcess(processId);
       if (await this.storage.get("auth-reset")) {
         if (running && ["starting", "running"].includes(running.status))
@@ -231,6 +417,17 @@ export class UserRuntime {
           8766,
         );
         if (health.ok) return;
+        if (this.persistenceConfigured()) {
+          const stopped = await this.sandbox.containerFetch(
+            "http://127.0.0.1/quiesce",
+            { method: "POST" },
+            8766,
+          );
+          if (stopped.status !== 204)
+            throw Error(
+              "Previous Codex process is still stopping. Retry shortly.",
+            );
+        }
         await this.sandbox.killProcess(processId);
       }
       // Rotate the callback capability before restoring. Late checkpoints from
@@ -270,6 +467,11 @@ export class UserRuntime {
           CODEX_HOME: "/workspace/.codex",
           AGENTFLARE_SHARED_RUNTIME: "1",
           AGENTFLARE_AUTH_CALLBACK: `${this.env.BETTER_AUTH_URL}/api/codex-checkpoint/${this.identity}`,
+          ...(this.persistenceConfigured()
+            ? {
+                AGENTFLARE_WORKSPACE_CALLBACK: `${this.env.BETTER_AUTH_URL}/api/runtime-checkpoint/${this.identity}`,
+              }
+            : {}),
           AGENTFLARE_AUTH_CAPABILITY: capability,
         },
       });
@@ -292,13 +494,21 @@ export class UserRuntime {
       this.connecting = undefined;
     }
   }
-  async acp(id: string, action?: AcpAction): Promise<AcpSnapshot> {
+  acp(id: string, action?: AcpAction): Promise<AcpSnapshot> {
+    return this.serialized(() => this.acpUnlocked(id, action));
+  }
+  private async acpUnlocked(
+    id: string,
+    action?: AcpAction,
+  ): Promise<AcpSnapshot> {
     if (this.signingOut) throw Error("Codex sign-out is in progress.");
     if (action?.type === "logout") this.signingOut = true;
     try {
       await this.require(id);
       await this.connect();
       await this.status(id);
+      if (action && !["connect", "logout"].includes(action.type))
+        await this.dirty();
       const snapshot = await this.fetch(
         id,
         action && action.type !== "connect" ? "POST" : "GET",
@@ -321,9 +531,137 @@ export class UserRuntime {
         await this.storage.delete("auth-reset");
         snapshot.authPersistence = "saved";
       }
-      return { ...snapshot, authScope: "user" };
+      await this.saveSnapshot(id, snapshot).catch(async () => {
+        await this.storage.put("checkpoint-error", true);
+      });
+      return {
+        ...snapshot,
+        authScope: "user",
+        persistence: await this.persistence(),
+      };
     } finally {
       if (action?.type === "logout") this.signingOut = false;
+    }
+  }
+
+  checkpoint(token: string): Promise<{ saved: boolean } | false> {
+    return this.serialized(async () => {
+      if (
+        !token ||
+        token !== (await this.storage.get<string>("auth-capability"))
+      )
+        return false;
+      return { saved: await this.checkpointUnlocked() };
+    });
+  }
+
+  prepareSleep(stop?: () => Promise<void>): Promise<boolean> {
+    return this.serialized(async () => {
+      if (!(await this.checkpointUnlocked())) return false;
+      // Keep the fence through shutdown: a prompt accepted between the archive
+      // and stopping the container would otherwise be deliberately discarded.
+      await stop?.();
+      return true;
+    });
+  }
+
+  private async checkpointUnlocked(): Promise<boolean> {
+    try {
+      return await this.captureCheckpoint();
+    } catch (error) {
+      await this.storage.put("checkpoint-error", true);
+      throw error;
+    }
+  }
+
+  private async captureCheckpoint(): Promise<boolean> {
+    if (!this.persistenceConfigured()) return true;
+    // An aborted restore must never be backed up as a new complete workspace.
+    if (await this.storage.get("restore-pending")) return false;
+    const process = await this.sandbox.getProcess(processId);
+    const running = process && ["starting", "running"].includes(process.status);
+    const live =
+      running &&
+      (await this.sandbox.containerFetch("http://127.0.0.1/health", {}, 8766))
+        .ok;
+    if (live) {
+      const activity = await this.sandbox.containerFetch(
+        "http://127.0.0.1/activity",
+        {},
+        8766,
+      );
+      if (!activity.ok) throw Error("Runtime activity unavailable.");
+      const sessions = (await activity.json()) as Record<
+        string,
+        { status: AcpSnapshot["status"] }
+      >;
+      for (const id of Object.keys(sessions)) {
+        if (await this.storage.get(`deleted:${id}`)) continue;
+        const snapshot = await this.fetch(id, "GET");
+        await this.saveSnapshot(id, snapshot);
+      }
+      if (
+        Object.values(sessions).some((session) =>
+          ["running", "configuring", "connecting", "authenticating"].includes(
+            session.status,
+          ),
+        )
+      )
+        return false; // transcripts are durable; active workspace writes are not.
+    }
+    const previous = await this.storage.get<BackupPointer>("runtime-backup");
+    if (
+      previous?.digest ===
+      String((await this.storage.get<number>("workspace-revision")) ?? 0)
+    ) {
+      await this.storage.delete("checkpoint-error");
+      return true;
+    }
+    if (running) {
+      // Health 503 is not proof that native writers exited. A failed quiesce
+      // must be retried, never bypassed on the next checkpoint attempt.
+      const quiesced = await this.sandbox.containerFetch(
+        "http://127.0.0.1/quiesce",
+        { method: "POST" },
+        8766,
+      );
+      if (quiesced.status === 409) return false;
+      if (quiesced.status !== 204)
+        throw Error("Runtime could not be quiesced.");
+    }
+    await this.saveWorkspaceCheckpoint();
+    await this.storage.delete("checkpoint-error");
+    return true;
+  }
+
+  private async saveWorkspaceCheckpoint() {
+    if (!this.persistenceConfigured()) return;
+    const digest = String(
+      (await this.storage.get<number>("workspace-revision")) ?? 0,
+    );
+    const previous = await this.storage.get<BackupPointer>("runtime-backup");
+    if (previous?.digest === digest) return;
+    const backup = await this.sandbox.createBackup({
+      dir: "/workspace",
+      gitignore: false,
+      excludes: [".codex/auth.json"],
+      ttl: backupTtl,
+    });
+    const savedAt = new Date().toISOString();
+    // Publish only after the SDK completed archive and metadata upload.
+    await this.storage.put("runtime-backup", {
+      backup,
+      savedAt,
+      digest,
+    } satisfies BackupPointer);
+    if (previous && previous.backup.id !== backup.id) {
+      const bucket = this.env.BACKUP_BUCKET!;
+      await bucket
+        .delete([
+          `backups/${previous.backup.id}/data.sqsh`,
+          `backups/${previous.backup.id}/meta.json`,
+        ])
+        .catch(() => {});
     }
   }
   private async fetch(

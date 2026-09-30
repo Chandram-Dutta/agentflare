@@ -46,6 +46,12 @@ export class ThreadSandbox extends Sandbox<Bindings> {
   userAcp(id: string, action?: AcpAction) {
     return this.shared.acp(id, action);
   }
+  userSaved(id: string) {
+    return this.shared.userSaved(id);
+  }
+  saveRuntimeCheckpoint(token: string) {
+    return this.shared.checkpoint(token);
+  }
   async userActivity(): Promise<Record<string, AcpActivity>> {
     // Inspect only a live container. Status polling must not boot a sandbox.
     if (!this.ctx.container?.running) return {};
@@ -57,6 +63,16 @@ export class ThreadSandbox extends Sandbox<Bindings> {
   }
   saveCodexCredentials(token: string, value: string | null) {
     return this.shared.persist(token, value);
+  }
+  override async onActivityExpired(): Promise<void> {
+    // Do not deliberately discard unsaved work or interrupt a running sibling.
+    // SDK calls made by prepareSleep renew activity and schedule another expiry.
+    const token = await this.ctx.storage.get<string>("auth-capability");
+    if (token)
+      await this.shared
+        .prepareSleep(() => super.onActivityExpired())
+        .catch(() => false);
+    else await super.onActivityExpired();
   }
   private starting?: Promise<RuntimeState>;
   private startingAcp?: Promise<AcpSnapshot>;

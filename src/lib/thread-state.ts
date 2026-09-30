@@ -21,6 +21,7 @@ export type RepositoryState = {
 export type ThreadState = {
   runtime?: RuntimeState;
   snapshot?: AcpSnapshot;
+  hydrated?: boolean;
   draft: string;
   attachments?: AcpContent[];
   scroll?: number;
@@ -98,6 +99,12 @@ export class ThreadStateStore {
         this.get(id).activity?.turn,
     });
     const previous = this.get(id).snapshot;
+    if (
+      snapshot.status === "connecting" &&
+      !snapshot.messages.length &&
+      previous?.messages.length
+    )
+      snapshot = { ...snapshot, messages: previous.messages };
     this.update(id, {
       snapshot:
         JSON.stringify(previous) === JSON.stringify(snapshot)
@@ -126,19 +133,33 @@ export class ThreadStateStore {
   }
   async ensure(id: string) {
     if (this.loads.has(id)) return this.loads.get(id);
-    if (this.get(id).runtime) return;
+    if (this.get(id).hydrated) return;
     const version = this.versions.get(id) ?? 0;
     const load = (async () => {
       try {
-        const runtime = await this.request<RuntimeState>(
-          `/threads/${id}/runtime/status`,
-          "GET",
-          undefined,
-          AbortSignal.timeout(15000),
-        );
+        const [runtime, saved] = await Promise.all([
+          this.request<RuntimeState>(
+            `/threads/${id}/runtime/status`,
+            "GET",
+            undefined,
+            AbortSignal.timeout(15000),
+          ),
+          this.request<AcpSnapshot | null>(
+            `/threads/${id}/runtime/saved`,
+            "GET",
+            undefined,
+            AbortSignal.timeout(15000),
+          ),
+        ]);
         if ((this.versions.get(id) ?? 0) !== version) return;
-        this.update(id, { runtime, error: "" });
-        if (runtime.started && runtime.agent === "codex")
+        this.update(id, {
+          runtime,
+          hydrated: true,
+          error: "",
+          ...(runtime.started && saved ? { snapshot: saved } : {}),
+        });
+        if (runtime.started && saved) this.accept(id, saved);
+        if (runtime.started && runtime.agent === "codex" && !saved?.saved)
           await this.action(id, { type: "connect" });
       } catch (error) {
         if ((this.versions.get(id) ?? 0) === version)
@@ -175,7 +196,22 @@ export class ThreadStateStore {
     const version = (this.versions.get(id) ?? 0) + 1;
     this.versions.set(id, version);
     this.epoch++;
-    this.update(id, { pending: true, error: "" });
+    const previousSnapshot = this.get(id).snapshot;
+    // A connect from a checkpoint is an explicit resume. Remove the marker
+    // immediately so conversation and repository polling can begin.
+    this.update(id, {
+      pending: true,
+      error: "",
+      ...(action.type === "connect" && previousSnapshot?.saved
+        ? {
+            snapshot: {
+              ...previousSnapshot,
+              saved: false,
+              status: "connecting",
+            },
+          }
+        : {}),
+    });
     try {
       const snapshot = await this.request<AcpSnapshot>(
         `/threads/${id}/runtime/acp`,
@@ -183,7 +219,14 @@ export class ThreadStateStore {
         action,
       );
       if (this.versions.get(id) !== version) return false;
-      this.accept(id, snapshot);
+      this.accept(
+        id,
+        action.type === "connect" &&
+          snapshot.messages.length === 0 &&
+          previousSnapshot?.messages.length
+          ? { ...snapshot, messages: previousSnapshot.messages }
+          : snapshot,
+      );
       // Clear only the submitted draft, not text typed while the request ran.
       if (action.type === "prompt" && this.get(id).draft.trim() === action.text)
         this.update(id, { draft: "" });
@@ -195,7 +238,12 @@ export class ThreadStateStore {
       return true;
     } catch (error) {
       if (this.versions.get(id) === version)
-        this.update(id, { error: (error as Error).message });
+        this.update(id, {
+          error: (error as Error).message,
+          ...(action.type === "connect" && previousSnapshot?.saved
+            ? { snapshot: previousSnapshot }
+            : {}),
+        });
       return false;
     } finally {
       this.epoch++;
@@ -208,6 +256,7 @@ export class ThreadStateStore {
     if (
       !state.runtime?.started ||
       state.runtime.agent !== "codex" ||
+      state.snapshot?.saved ||
       state.pending
     )
       return;

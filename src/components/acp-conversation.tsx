@@ -7,7 +7,14 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { ArrowUp, SquareTerminal, LogOut, Square } from "lucide-react";
+import {
+  ArrowUp,
+  SquareTerminal,
+  LogOut,
+  Square,
+  RotateCcw,
+  Save,
+} from "lucide-react";
 import { createPortal } from "react-dom";
 import { Button } from "./ui/button";
 import { AcpMessages } from "./acp-messages";
@@ -90,11 +97,27 @@ export function AcpConversation({
   }
 
   const loginUrl = snapshot?.login ? safeLoginUrl(snapshot.login.url) : null;
-  const idle = snapshot?.status === "ready";
+  const saved = Boolean(snapshot?.saved);
+  const idle = snapshot?.status === "ready" && !saved;
 
-  const status = networkError
-    ? "disconnected"
-    : (snapshot?.status ?? "loading");
+  const status = saved
+    ? "saved"
+    : networkError
+      ? "disconnected"
+      : (snapshot?.status ?? "loading");
+  const persistence = snapshot?.persistence;
+  const savedAt = persistence?.savedAt
+    ? new Date(persistence.savedAt).toLocaleString()
+    : undefined;
+  const persistenceLabel = persistence
+    ? persistence.state === "saved"
+      ? "workspace saved"
+      : persistence.state === "saving"
+        ? "save pending"
+        : persistence.state === "error"
+          ? "workspace save failed"
+          : "workspace saving disabled"
+    : undefined;
   const controls = (
     <div className="flex items-center gap-1 text-muted-foreground">
       <span
@@ -111,6 +134,15 @@ export function AcpConversation({
         <span>{status}</span>
       </span>
       <div className="flex items-center gap-2">
+        {persistenceLabel && (
+          <span
+            className="hidden items-center gap-1 text-[10px] text-muted-foreground sm:flex"
+            title={`Workspace checkpoint: ${persistenceLabel}. ${savedAt ? `Last safe save: ${savedAt}. ` : ""}Pending backups wait for all threads to be idle.`}
+          >
+            <Save className="size-3" aria-hidden="true" />
+            {persistenceLabel}
+          </span>
+        )}
         {snapshot?.status === "running" && (
           <Button
             variant="ghost"
@@ -171,6 +203,39 @@ export function AcpConversation({
             <p className="text-muted-foreground">
               Showing recent output. Long messages may be shortened.
             </p>
+          )}
+          {saved && (
+            <div className="rounded-md border bg-muted/30 p-3 text-muted-foreground">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p>Saved history. Resume the workspace to continue.</p>
+                <Button
+                  variant="outline"
+                  className="h-7 rounded-md text-xs"
+                  disabled={actionPending}
+                  onClick={() => void action({ type: "connect" })}
+                >
+                  <RotateCcw className="mr-1 size-3" aria-hidden="true" />
+                  Resume workspace
+                </Button>
+              </div>
+              {snapshot?.interrupted && (
+                <p className="mt-2">
+                  Previous operation may have been interrupted; it will not be
+                  rerun automatically.
+                </p>
+              )}
+              {persistence && persistence.state !== "saved" && (
+                <p className="mt-2">
+                  This history may be newer than the saved files. Only the last
+                  successful workspace checkpoint can be restored.
+                </p>
+              )}
+              {networkError && (
+                <p role="alert" className="mt-2 text-destructive">
+                  {networkError}
+                </p>
+              )}
+            </div>
           )}
           {!snapshot && !networkError && (
             <p role="status" className="text-muted-foreground">
@@ -289,28 +354,29 @@ export function AcpConversation({
             </div>
           ))}
 
-          {(snapshot?.error ||
-            networkError ||
-            snapshot?.status === "disconnected") && (
-            <div
-              role="alert"
-              className="border border-destructive/40 p-3 text-destructive"
-            >
-              <p>
-                {networkError ||
-                  snapshot?.error ||
-                  "Codex is disconnected. Reconnect to continue."}
-              </p>
-              <Button
-                variant="outline"
-                className="mt-3 rounded-none text-xs"
-                disabled={actionPending}
-                onClick={() => void action({ type: "connect" })}
+          {!saved &&
+            (snapshot?.error ||
+              networkError ||
+              snapshot?.status === "disconnected") && (
+              <div
+                role="alert"
+                className="border border-destructive/40 p-3 text-destructive"
               >
-                reconnect
-              </Button>
-            </div>
-          )}
+                <p>
+                  {networkError ||
+                    snapshot?.error ||
+                    "Codex is disconnected. Reconnect to continue."}
+                </p>
+                <Button
+                  variant="outline"
+                  className="mt-3 rounded-none text-xs"
+                  disabled={actionPending}
+                  onClick={() => void action({ type: "connect" })}
+                >
+                  reconnect
+                </Button>
+              </div>
+            )}
           {snapshot?.status === "connecting" && (
             <p role="status" className="text-muted-foreground">
               starting Codex session…
@@ -346,7 +412,11 @@ export function AcpConversation({
             rows={2}
             disabled={!idle || actionPending}
             placeholder={
-              idle ? "Describe a developer task…" : "Codex is not ready"
+              idle
+                ? "Describe a developer task…"
+                : saved
+                  ? "Resume workspace to continue"
+                  : "Codex is not ready"
             }
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={(event) => {

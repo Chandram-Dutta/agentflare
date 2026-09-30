@@ -1,10 +1,38 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { retainContent, appendContent, boundContent, promptContent } from "./content.mjs";
 import { createAuthCheckpoint } from "./auth-checkpoint.mjs";
+import { createCheckpointLoop } from "./checkpoint-loop.mjs";
+
+function childExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => child.once("exit", resolve));
+}
+
+async function stopChildTree(child) {
+  if (!child.pid) return;
+  const exited = childExit(child);
+  try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch {} }
+  // Waiting for just the adapter is insufficient: its app-server may still be
+  // flushing SQLite/rollouts. Do not start an archive while any group writer lives.
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const entries = await readdir("/proc");
+    const states = await Promise.all(entries.filter((id) => /^\d+$/.test(id)).map(async (id) => {
+      try {
+        const stat = await readFile(`/proc/${id}/stat`, "utf8");
+        const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        return Number(fields[2]) === child.pid && !["Z", "X"].includes(fields[0]);
+      } catch { return false; }
+    }));
+    if (!states.some(Boolean)) { await exited; return; }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  // Fail the checkpoint rather than force-killing a writer and claiming a clean save.
+  throw new Error("Agent processes did not stop cleanly");
+}
 
 // The bridge owns the conversation, not a browser connection. Only this fixed
 // application protocol is exposed to the Worker, never arbitrary ACP requests.
@@ -29,6 +57,7 @@ export function createBridge({
   const child = spawn(command[0], command.slice(1), {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
     // Never inherit operator credentials into the model environment.
     env: {
       ...Object.fromEntries(
@@ -470,7 +499,7 @@ export function createBridge({
     async close() {
       dead = true;
       settlePending();
-      child.kill();
+      await stopChildTree(child);
       await connection.close();
     },
   };
@@ -483,6 +512,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 export function createUserBridge({
   command = ["/opt/agentflare/acp/node_modules/.bin/codex-acp"],
   root = "/workspace/threads",
+  authCheckpoint,
+  onSettled = () => {},
 } = {}) {
   const contexts = new Map();
   const routes = new Map();
@@ -493,9 +524,12 @@ export function createUserBridge({
   let login;
   let loginResolve;
   let loggingOut = false;
+  let quiescing = false;
+  let quiesced = false;
   const child = spawn(command[0], command.slice(1), {
     cwd: root,
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
     env: {
       ...Object.fromEntries(["PATH", "HOME", "LANG", "TERM", "CODEX_HOME"].flatMap(
         (key) => process.env[key] === undefined ? [] : [[key, process.env[key]]],
@@ -658,6 +692,7 @@ export function createUserBridge({
       catch (e) { routes.delete(saved); throw e; }
     } else {
       result = await agent.request(methods.agent.session.new, { cwd: c.cwd, mcpServers: [] });
+      c.freshSession = true;
       c.sessionId = result.sessionId;
       routes.set(c.sessionId, c);
       await mkdir(dirname(c.sessionFile), { recursive: true, mode: 0o700 });
@@ -683,7 +718,7 @@ export function createUserBridge({
     return authentication;
   }
   async function act(c, action) {
-    if (dead || c.deleted || loggingOut) throw new Error("Disconnected");
+    if (dead || c.deleted || loggingOut || quiescing) throw new Error("Disconnected");
     if (action.type === "authenticate") {
       if (c.snapshot.status !== "auth-required" && c.snapshot.status !== "authenticating") throw new Error("Not ready for login");
       void authenticate().catch(e => fail(c, e));
@@ -702,7 +737,7 @@ export function createUserBridge({
       boundContent(c.snapshot);
       c.currentMessage = undefined; c.snapshot.status = "running";
       c.prompt = agent.request(methods.agent.session.prompt, { sessionId: c.sessionId, prompt: content })
-        .then(() => { settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; }).catch((e) => fail(c, e));
+        .then(() => { settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; onSettled(); }).catch((e) => fail(c, e));
     } else if (action.type === "permission") {
       const p = c.permissions.get(action.id);
       if (!p || !p.options.some((x) => x.optionId === action.optionId)) throw new Error("Permission request expired or invalid choice");
@@ -728,7 +763,7 @@ export function createUserBridge({
   }
   async function session(threadId) {
     if (!UUID.test(threadId)) throw new Error("Invalid thread id");
-    if (loggingOut || dead || deleted.has(threadId)) throw Error("Disconnected");
+    if (loggingOut || quiescing || dead || deleted.has(threadId)) throw Error("Disconnected");
     if (contexts.has(threadId)) return contexts.get(threadId).public;
     const c = { snapshot: { status: "connecting", messages: [], permissions: [], configOptions: [] }, permissions: new Map(), promptIds: new Set(), cwd: `${root}/${threadId}/repo`, sessionFile: `${root}/${threadId}/acp-session` };
     c.public = { snapshot: c.snapshot, act: (a) => act(c, a) };
@@ -751,19 +786,60 @@ export function createUserBridge({
     }])),
     async deleteSession(threadId) {
     if (!UUID.test(threadId)) throw new Error("Invalid thread id");
+    if (quiescing) throw Error("Disconnected");
     deleted.add(threadId);
     const c = contexts.get(threadId); if (!c) return;
     c.deleted = true; settle(c); contexts.delete(threadId); if (c.sessionId) { routes.delete(c.sessionId); if (c.snapshot.status === "running") await agent.notify(methods.agent.session.cancel, { sessionId: c.sessionId }); }
     await c.public.ready;
     await c.prompt;
     if (c.sessionId) routes.delete(c.sessionId);
-  }, async close() { dead = true; if (loginResolve) loginResolve({ action: "cancel" }); for (const c of contexts.values()) settle(c); child.kill(); await connection.close(); } };
+  }, async quiesce() {
+    if (quiesced) return true;
+    if (quiescing) return false;
+    if (dead) {
+      await stopChildTree(child);
+      await connection.close();
+      quiesced = true;
+      return true;
+    }
+    quiescing = true; // Fence session/action/delete before waiting on readiness races.
+    await Promise.all([...contexts.values()].map((c) => c.public.ready));
+    const busy = authentication || loggingOut || loginResolve || [...contexts.values()].some((c) =>
+      ["running", "configuring", "connecting", "authenticating"].includes(c.snapshot.status) ||
+      c.permissions.size > 0 || Boolean(c.snapshot.login));
+    if (busy) { quiescing = false; return false; }
+    try { await authCheckpoint?.sync(); }
+    catch { quiescing = false; return false; }
+    for (const c of contexts.values()) {
+      if (c.freshSession && !c.turn)
+        try { await unlink(c.sessionFile); } catch (e) { if (e.code !== "ENOENT") { quiescing = false; throw e; } }
+    }
+    dead = true;
+    if (loginResolve) loginResolve({ action: "cancel" });
+    for (const c of contexts.values()) settle(c);
+    try {
+      await stopChildTree(child);
+      await connection.close();
+      quiesced = true;
+      return true;
+    } finally { quiescing = false; }
+  }, async close() { dead = true; if (loginResolve) loginResolve({ action: "cancel" }); for (const c of contexts.values()) settle(c); await stopChildTree(child); await connection.close(); } };
 }
 
 if (import.meta.main) {
   const shared = process.env.AGENTFLARE_SHARED_RUNTIME === "1";
   const checkpoint = shared ? createAuthCheckpoint({ path: `${process.env.CODEX_HOME}/auth.json`, url: process.env.AGENTFLARE_AUTH_CALLBACK, token: process.env.AGENTFLARE_AUTH_CAPABILITY }) : undefined;
-  const bridge = shared ? createUserBridge() : createBridge();
+  let callback;
+  const bridge = shared ? createUserBridge({ authCheckpoint: checkpoint, onSettled: () => callback?.settled() }) : createBridge();
+  if (shared) callback = createCheckpointLoop({
+    url: process.env.AGENTFLARE_WORKSPACE_CALLBACK,
+    token: process.env.AGENTFLARE_AUTH_CAPABILITY,
+    payload: () => ({}),
+    // Quiet saved runtimes must stop calling the DO so its idle timer can expire.
+    // A new POST or a settled turn re-arms the loop.
+    shouldContinue: () => bridge.isAlive() && Object.values(bridge.activity()).some(
+      (s) => ["running", "configuring", "connecting", "authenticating"].includes(s.status)),
+  });
   const server = Bun.serve({
     hostname: "0.0.0.0", // Reachable only through the authenticated Worker/DO.
     port: 8766,
@@ -773,6 +849,10 @@ if (import.meta.main) {
       if (shared && path === "/health") return new Response(null, { status: bridge.isAlive() ? 204 : 503 });
       if (shared && path === "/activity" && request.method === "GET")
         return Response.json(bridge.activity(), { headers: { "Cache-Control": "no-store" } });
+      if (shared && path === "/quiesce" && request.method === "POST") {
+        try { return new Response(null, { status: await bridge.quiesce() ? 204 : 409 }); }
+        catch { return new Response(null, { status: 409 }); }
+      }
       let target = bridge;
       let threadId;
       if (shared) {
@@ -792,6 +872,7 @@ if (import.meta.main) {
       if (request.method === "POST") {
         try {
           await target.act(await request.json());
+          callback?.settled();
         } catch (error) {
           return Response.json(
             { error: error.message === "Sign-out unavailable while busy" ? "Stop all running Codex threads before signing out." : "ACP action could not be applied." },
@@ -812,6 +893,7 @@ if (import.meta.main) {
   });
   process.on("SIGTERM", () => {
     checkpoint?.stop();
+    callback?.stop();
     server.stop(true);
     void bridge.close().finally(() => process.exit(0));
   });

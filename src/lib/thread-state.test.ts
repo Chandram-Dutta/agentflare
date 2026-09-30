@@ -55,7 +55,9 @@ test("switching shares an in-flight connect and retains isolated drafts and snap
   const calls: string[] = [];
   const store = storeWith(async (path, method) => {
     calls.push(`${method}:${path}`);
-    return path.endsWith("/status") ? runtime : connect.promise;
+    if (path.endsWith("/status")) return runtime;
+    if (path.endsWith("/saved")) return null;
+    return connect.promise;
   });
   store.select("a");
   const first = store.ensure("a");
@@ -69,6 +71,7 @@ test("switching shares an in-flight connect and retains isolated drafts and snap
   await store.ensure("a");
   expect(calls).toEqual([
     "GET:/threads/a/runtime/status",
+    "GET:/threads/a/runtime/saved",
     "POST:/threads/a/runtime/acp",
   ]);
   expect(store.get("a")).toMatchObject({
@@ -77,6 +80,73 @@ test("switching shares an in-flight connect and retains isolated drafts and snap
     snapshot: ready,
   });
   expect(store.get("b").draft).toBe("different B");
+});
+
+test("saved history is shown without connecting or polling until resume", async () => {
+  const saved: AcpSnapshot = {
+    ...ready,
+    saved: true,
+    messages: [{ id: "old", role: "assistant", text: "saved result" }],
+  };
+  const calls: string[] = [];
+  const store = storeWith(async (path) => {
+    calls.push(path);
+    return path.endsWith("/status") ? runtime : saved;
+  });
+  await store.ensure("a");
+  await store.pollConversation("a");
+  expect(store.get("a").snapshot).toEqual(saved);
+  expect(calls).toEqual([
+    "/threads/a/runtime/status",
+    "/threads/a/runtime/saved",
+  ]);
+});
+
+test("switching while saved-history requests overlap keeps responses isolated", async () => {
+  const savedA = deferred<AcpSnapshot | null>();
+  const savedB = deferred<AcpSnapshot | null>();
+  const store = storeWith(async (path) => {
+    if (path.endsWith("/status")) return runtime;
+    return path.includes("/a/") ? savedA.promise : savedB.promise;
+  });
+  store.select("a");
+  const loadingA = store.ensure("a");
+  store.select("b");
+  const loadingB = store.ensure("b");
+  savedB.resolve({
+    ...ready,
+    saved: true,
+    messages: [{ id: "b", role: "assistant", text: "B" }],
+  });
+  await loadingB;
+  savedA.resolve({
+    ...ready,
+    saved: true,
+    messages: [{ id: "a", role: "assistant", text: "A" }],
+  });
+  await loadingA;
+  expect(store.get("a").snapshot?.messages[0]?.text).toBe("A");
+  expect(store.get("b").snapshot?.messages[0]?.text).toBe("B");
+});
+
+test("resume clears saved state and preserves history until ACP replay arrives", async () => {
+  const history = [{ id: "old", role: "assistant" as const, text: "result" }];
+  const response = deferred<AcpSnapshot>();
+  const store = storeWith(async () => response.promise);
+  store.update("a", {
+    runtime,
+    hydrated: true,
+    snapshot: { ...ready, saved: true, messages: history },
+  });
+  const resuming = store.action("a", { type: "connect" });
+  expect(store.get("a").snapshot).toMatchObject({
+    saved: false,
+    messages: history,
+  });
+  response.resolve(ready);
+  expect(await resuming).toBe(true);
+  expect(store.get("a").snapshot?.messages).toEqual(history);
+  expect(store.get("a").snapshot?.saved).toBeUndefined();
 });
 
 test("an old GET cannot overwrite a newer prompt action, even after switching", async () => {

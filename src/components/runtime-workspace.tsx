@@ -45,7 +45,13 @@ export function RuntimeWorkspace({
   children: (started: boolean) => ReactNode;
 }) {
   const store = useThreadStore();
-  const { runtime: state, error, pending } = useThreadState(threadId ?? "");
+  const {
+    runtime: state,
+    snapshot,
+    hydrated,
+    error,
+    pending,
+  } = useThreadState(threadId ?? "");
   const [agentControls, setAgentControls] = useState<HTMLDivElement | null>(
     null,
   );
@@ -88,8 +94,8 @@ export function RuntimeWorkspace({
               {error}
             </p>
           )}
-          {state?.started && threadId ? (
-            state.agent === "codex" ? (
+          {threadId && (state?.started || snapshot?.saved) ? (
+            state?.agent === "codex" || snapshot?.saved ? (
               <AcpConversation
                 key={threadId}
                 threadId={threadId}
@@ -109,22 +115,26 @@ export function RuntimeWorkspace({
                   ? "Create a thread to start a Codex workspace."
                   : pending
                     ? "Starting sandbox and checking out repository…"
-                    : "Start this thread to open its Codex workspace."}
+                    : !hydrated
+                      ? "Checking workspace…"
+                      : "Start this thread to open its Codex workspace."}
               </p>
               {threadId && (
                 <p className="mt-3 max-w-lg leading-5 text-muted-foreground">
-                  Sign in to Codex from the conversation after startup. Sandbox
-                  files are temporary and may be lost after 30 minutes idle or a
-                  container restart. Export important work before leaving;
-                  thread metadata is not a backup. Use Changes to publish a
-                  reviewed snapshot to a draft PR.
+                  Sign in to Codex from the conversation after startup. With
+                  workspace saving configured, files and sessions resume from
+                  the last successful checkpoint. Check save status before
+                  leaving. Use Changes to publish a reviewed snapshot to a draft
+                  PR.
                 </p>
               )}
               {threadId && (
                 <Button
                   variant="outline"
                   className="mt-4 rounded-none text-xs"
-                  disabled={pending || (!state && !error)}
+                  disabled={
+                    pending || (!hydrated && !error) || (!state && !error)
+                  }
                   onClick={() =>
                     state ? void start() : void store.ensure(threadId)
                   }
@@ -150,7 +160,12 @@ export function RuntimeWorkspace({
         threadId={threadId ?? ""}
         projectId={projectId}
         hiddenPanes={hiddenPanes}
-        started={Boolean(state?.started)}
+        started={Boolean(
+          hydrated &&
+            state?.started &&
+            !snapshot?.saved &&
+            snapshot?.status !== "connecting",
+        )}
         ref={inspectorRef}
       />
     </>

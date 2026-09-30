@@ -1,6 +1,12 @@
 // Scripted protocol peer for bridge regression tests. No provider access.
 import { createInterface } from "node:readline";
 import { existsSync, writeFileSync, rmSync } from "node:fs";
+if (process.argv.includes("slow-exit")) {
+  process.on("SIGTERM", () => setTimeout(() => {
+    writeFileSync("child-exited", "yes");
+    process.exit(0);
+  }, 50));
+}
 const send = (message) =>
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const reply = (id, result) => send({ id, result });

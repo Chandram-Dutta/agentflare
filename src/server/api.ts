@@ -183,6 +183,27 @@ api.post("/codex-checkpoint/:id", bodyLimit({ maxSize: 65536 }), async (c) => {
   }
 });
 
+// Empty wake-up notification from the bridge. Read state directly from the
+// owning runtime, never trust a browser-supplied transcript or archive handle.
+api.post("/runtime-checkpoint/:id", bodyLimit({ maxSize: 1024 }), async (c) => {
+  if (!c.env.Sandboxes || !/^[a-f0-9]{64}$/.test(c.req.param("id")))
+    return c.notFound();
+  const token = c.req
+    .header("Authorization")
+    ?.match(/^Bearer ([a-f0-9-]{72})$/)?.[1];
+  if (!token) return c.json({ error: "Unauthorized" }, 401);
+  try {
+    const sandbox = c.env.Sandboxes.get(
+      c.env.Sandboxes.idFromString(c.req.param("id")),
+    );
+    const result = await sandbox.saveRuntimeCheckpoint(token);
+    if (!result) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(result);
+  } catch {
+    return c.json({ error: "Checkpoint unavailable" }, 503);
+  }
+});
+
 // All routes below require both a valid session and current operator admission.
 api.use(
   "*",
@@ -473,6 +494,27 @@ const acpAction = z.discriminatedUnion("type", [
 ]);
 
 // Ownership and the global origin/session gates run before a sandbox stub is obtained.
+api.get("/threads/:id/runtime/saved", async (c) => {
+  const owned = await c
+    .get("db")
+    .select({ id: thread.id, runtime: thread.runtime })
+    .from(thread)
+    .innerJoin(project, eq(thread.projectId, project.id))
+    .where(
+      and(
+        eq(thread.id, c.req.param("id")),
+        eq(project.ownerId, c.get("user").id),
+      ),
+    )
+    .get();
+  if (!owned) return c.notFound();
+  if (owned.runtime !== "user" || !c.env.Sandboxes) return c.json(null);
+  const sandbox = c.env.Sandboxes.get(
+    c.env.Sandboxes.idFromName(userSandboxName(c.get("user").id)),
+  );
+  return c.json(await sandbox.userSaved(owned.id));
+});
+
 api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
   const owned = await c
     .get("db")

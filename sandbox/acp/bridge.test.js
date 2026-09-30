@@ -1,9 +1,10 @@
 import { test, expect } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createBridge, createUserBridge } from "./bridge.mjs";
+import { createCheckpointLoop } from "./checkpoint-loop.mjs";
 
 const fake = fileURLToPath(new URL("./fake-agent.mjs", import.meta.url));
 const richAttachments = [
@@ -309,4 +310,112 @@ test("deleting a running shared session settles its turn without stopping its si
     await b.act({type:"set-config",configId:"model",value:"large"});
     expect(b.snapshot.configOptions[0].currentValue).toBe("large");
   });
+});
+
+test("quiesce refuses busy work without fencing the bridge", async () => {
+  await sharedFixture(true, async (bridge) => {
+    const a = await bridge.session(threadA);
+    await a.ready;
+    await a.act({ type: "prompt", text: "inspect", requestId: "busy-checkpoint" });
+    await until(() => a.snapshot.permissions.length === 1);
+    expect(await bridge.quiesce()).toBe(false);
+    await a.act({ type: "permission", id: a.snapshot.permissions[0].id, optionId: "deny" });
+    await until(() => a.snapshot.status === "ready");
+    await a.act({ type: "set-config", configId: "model", value: "large" });
+    expect(a.snapshot.status).toBe("ready");
+  });
+});
+
+test("quiesce fences new work, removes only empty pointers, and awaits child exit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "acp-quiesce-"));
+  for (const id of [threadA, threadB]) await mkdir(join(root, id, "repo"), { recursive: true });
+  await writeFile(join(root, "authenticated"), "synthetic");
+  let release;
+  const checkpoint = { sync: () => new Promise((resolve) => { release = resolve; }) };
+  const bridge = createUserBridge({ command: [process.execPath, fake, "shared", "slow-exit"], root, authCheckpoint: checkpoint });
+  try {
+    const empty = await bridge.session(threadA);
+    const completed = await bridge.session(threadB);
+    await Promise.all([empty.ready, completed.ready]);
+    await completed.act({ type: "prompt", text: "inspect", requestId: "completed" });
+    await until(() => completed.snapshot.permissions.length === 1);
+    await completed.act({ type: "permission", id: completed.snapshot.permissions[0].id, optionId: "deny" });
+    await until(() => completed.snapshot.status === "ready");
+    const stopping = bridge.quiesce();
+    await until(() => Boolean(release));
+    await expect(completed.act({ type: "set-config", configId: "model", value: "large" })).rejects.toThrow();
+    await expect(bridge.session("33333333-3333-4333-8333-333333333333")).rejects.toThrow();
+    release();
+    expect(await stopping).toBe(true);
+    await expect(access(join(root, threadA, "acp-session"))).rejects.toThrow();
+    await access(join(root, threadB, "acp-session"));
+    await access(join(root, "child-exited"));
+    expect(bridge.isAlive()).toBe(false);
+    expect(await bridge.quiesce()).toBe(true);
+    expect(completed.snapshot.messages.some((m) => m.role === "assistant")).toBe(true);
+  } finally {
+    await bridge.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quiesce preserves a loaded session even without a new turn", async () => {
+  await sharedFixture(true, async (bridge, root) => {
+    const pointer = join(root, threadA, "acp-session");
+    await writeFile(pointer, `session-${threadA}`);
+    const a = await bridge.session(threadA);
+    await a.ready;
+    expect(a.snapshot.messages.map((m) => m.text)).toEqual(["previous task", "restored answer"]);
+    expect(await bridge.quiesce()).toBe(true);
+    expect(await readFile(pointer, "utf8")).toBe(`session-${threadA}`);
+  });
+});
+
+test("checkpoint callbacks never overlap and retry after errors", async () => {
+  let calls = 0;
+  let active = 0;
+  let maxActive = 0;
+  let release;
+  const loop = createCheckpointLoop({
+    url: "https://callback.invalid/checkpoint",
+    token: "secret",
+    payload: () => ({ activity: {} }),
+    interval: 60_000,
+    fetcher: async (_url, init) => {
+      calls++; active++; maxActive = Math.max(maxActive, active);
+      expect(init.headers.Authorization).toBe("Bearer secret");
+      if (calls === 1) await new Promise((resolve) => { release = resolve; });
+      active--;
+      if (calls === 2) throw new Error("temporary");
+      return new Response(null, { status: 204 });
+    },
+  });
+  const first = loop.run();
+  await until(() => Boolean(release));
+  const joined = loop.run();
+  release();
+  await Promise.all([first, joined]);
+  await loop.run(); // failed callback is swallowed
+  await loop.run(); // and can retry
+  loop.stop();
+  expect(calls).toBe(3);
+  expect(maxActive).toBe(1);
+});
+
+test("checkpoint loop pauses only after a successful idle save and re-arms for new work", async () => {
+  let calls = 0;
+  const loop = createCheckpointLoop({
+    url: "https://callback.invalid/checkpoint", token: "synthetic",
+    payload: () => ({}), shouldContinue: () => false, interval: 10, debounce: 1,
+    fetcher: async () => Response.json({ saved: ++calls > 1 }),
+  });
+  try {
+    await until(() => calls === 2);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(calls).toBe(2); // first pending save retried; successful idle save paused
+    loop.settled();
+    await until(() => calls === 3);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(calls).toBe(3);
+  } finally { loop.stop(); }
 });

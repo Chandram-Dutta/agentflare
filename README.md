@@ -50,11 +50,41 @@ threads still destroy their individual sandbox and login. Confirmation is requir
 Cleanup must succeed before thread metadata is removed; failed cleanup can be
 retried. Pushed GitHub branches are not deleted.
 
-**Experimental: workspace disk is ephemeral.** After 30 minutes idle or a container
-restart files can be lost; saved thread metadata is not a workspace backup.
-No R2 checkpoints yet. Clone credentials are short-lived and read-only, not left
-in Git configuration. The publishing UI does not grant native `git push` access
-to the agent. Do not entrust unpublished work to this initial runtime.
+### Persistent Codex threads
+
+With R2 configured, shared Codex threads save conversation snapshots and workspace
+checkpoints. Reopening a thread displays its saved history without booting a
+container. **Resume workspace** restores the latest workspace checkpoint on a
+fresh disk, then loads the native Codex session. Interrupted prompts and approvals
+are never automatically submitted again. A failed native session load is an error,
+not permission to silently start a different conversation.
+
+The bridge requests a checkpoint after a turn settles and every 30 seconds while
+alive, including when the browser is closed. Conversation snapshots can save
+during a turn; workspace archives wait until **all of the user's threads are idle**.
+The bridge stops its managed Codex processes before archiving the whole
+`/workspace`: per-thread repositories (including `.git`, staging, untracked and
+ignored files) and shared native session state. Credentials in `.codex/auth.json`
+are excluded and remain in the separate encrypted auth store. Initial checkouts
+and controlled idle shutdowns also attempt checkpoints. Failed uploads preserve
+the last successful archive; the UI reports pending or failed saves.
+
+**This is checkpoint recovery, not process recovery.** A forced container loss
+can lose work since the last successful checkpoint. Saved chat can be newer than
+restorable files. Background servers and externally detached processes are not
+resumed; avoid relying on their in-flight writes during a checkpoint. Files outside
+`/workspace` are not saved. Legacy per-thread Claude sandboxes remain ephemeral.
+Without the R2 configuration below, the UI says workspace saving is disabled.
+
+Deleting a thread removes its saved transcript and checkout; durable deletion
+markers also remove it when restoring an older archive. Other threads and the
+user's shared login survive. Native Codex session records are user-wide and can
+remain in the shared archive. The private bucket contains source code and anything
+an agent wrote to `/workspace`, potentially including secrets: restrict access,
+do not enable public hosting, and do not use expiration lifecycle rules.
+
+Clone credentials are short-lived and read-only, not left in Git configuration.
+The publishing UI does not grant native `git push` access to the agent.
 
 ### Codex sign-in
 
@@ -83,7 +113,7 @@ Existing threads retain their original `runtime=thread` sandbox and login. They
 are not moved or destroyed by the migration. Create a new Codex thread and sign in
 once to begin using the shared runtime. Apply the additive D1 migration before
 deploying this code and rebuild the container image; reusing the old image is not
-supported for this release. Workspace/conversation recovery remains separate work.
+supported for this release. R2 recovery applies only to shared Codex threads.
 
 Reconnecting a surviving sandbox reloads the saved ACP session;
 a failed load is reported rather than silently starting a new conversation.
@@ -180,8 +210,29 @@ resources, apply remote migrations and deploy to your account:
    Upload the PEM using `bunx wrangler secret put GITHUB_APP_PRIVATE_KEY < /secure/path/app.pem`.
 4. Review `migrations/`, back up existing data, then run
    `bunx wrangler d1 migrations apply DB --remote` on the intended account/database.
-5. Run `bun run build` and `bunx wrangler deploy --config dist/server/wrangler.json`.
+5. For persistent workspaces, create a private bucket with
+   `bunx wrangler r2 bucket create agentflare-workspaces`. Match its name in both
+   the `BACKUP_BUCKET` binding and `BACKUP_BUCKET_NAME` variable in the selected
+   Wrangler environment. Create R2 S3 credentials with **Object Read & Write**
+   access scoped to this bucket only. Upload `R2_ACCESS_KEY_ID` and
+   `R2_SECRET_ACCESS_KEY` as Worker secrets, and set `CLOUDFLARE_R2_ACCOUNT_ID` to
+   the account containing that bucket (as a variable or Worker secret).
+   For the named environment append `--env production` to `wrangler secret put`.
+   These credentials are required by Sandbox SDK 0.12.10 for archive upload and
+   restore; an R2 Worker binding alone is insufficient. Do not pass them to Codex
+   or put them in the Docker image. Checkpoints use `backups/` and
+   `runtime-snapshots/`; keep both private and exclude them from expiration rules.
+   The SDK requires a finite TTL, so archives use a 100-year expiry and superseded
+   archives are removed after a successful replacement. No new D1 migration is
+   required for workspace persistence; checkpoint pointers live in the user's DO.
+6. Run `bun run build` and `bunx wrangler deploy --config dist/server/wrangler.json`.
    Ensure the chosen domain serves this Worker before testing the OAuth callback.
+
+Local tests use fake storage and disposable data, not the production bucket.
+Leave the R2 credential variables empty for ordinary local development. A real
+archive integration check needs a separate development bucket with matching
+Worker binding and S3 credentials; do not mix locally emulated R2 objects with
+production S3 archives. Rebuild the container image with this release.
 
 This repository also includes the operator's `env.production` configuration for
 `agentflare.onlychan.xyz`. Other self-hosters must replace its domain, database ID,
@@ -269,8 +320,7 @@ input using the image's Bun and agent launcher. The launcher acquires a controll
 terminal so the SDK's pre-created PTY delivers SIGWINCH to the CLI. This is a
 local process-level regression check, not a live Cloudflare or agent UI test.
 
-Still needed: R2 workspace checkpoints and restore,
-agent restart/stop UX, and per-user runtime budgets.
+Still needed: per-user runtime/storage budgets and process-level recovery UX.
 
 **Publishing must be enforced at the credential boundary.** A confirmation button
 cannot prevent a native CLI from running `git push` if its sandbox already holds
@@ -281,6 +331,6 @@ for scoped repository credentials.
 Sandbox disk is ephemeral. Checkpoint files and supported agent session state;
 never promise process-memory recovery or preservation beyond the last checkpoint.
 Do not expose terminal, preview, clone or execution endpoints until their resource
-authorization is enforced. R2 restoration is not implemented yet.
+authorization is enforced. R2 restoration recovers only the last successful save.
 Local and production D1 bindings are separate. No deployment command runs during
 setup/tests.
