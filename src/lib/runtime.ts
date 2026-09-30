@@ -6,6 +6,20 @@ export type RuntimeState = {
 export type RepositoryFile = { path: string; content: string };
 export type GitChange = { path: string; index: string; worktree: string };
 
+export type PublishResult = { sha: string; url: string; number: number };
+export type BranchReview = {
+  revision: string;
+  branch: string;
+  baseBranch: string;
+  changes: { status: string; path: string }[];
+  published?: PublishResult;
+};
+export type PublishInput = {
+  revision: string;
+  title: string;
+  body: string;
+};
+
 export function repositoryPath(value: string): string {
   if (
     !value ||

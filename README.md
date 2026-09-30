@@ -19,8 +19,28 @@ Each started thread checks user and GitHub App repository access, clones into it
 own sandbox/branch. New threads default to Codex through the pinned ACP adapter.
 The sandbox bridge owns the conversation and pending approvals, so browser reloads
 do not restart a turn. The UI polls snapshots once per second; this is not yet a
-push-streaming transport. Files and Git stage use Pierre Trees/Diffs with actual
-repository data; use refresh after agent edits. Ask Codex to stage and commit.
+push-streaming transport. Files and Git use Pierre Trees/Diffs with actual
+repository data and refresh every five seconds while the page is visible.
+The open file/diff refreshes in place. Changes shows the complete thread snapshot
+against its starting base, including agent commits and uncommitted files.
+
+From Changes, **Create draft PR** reviews all changed paths and asks for a title
+and description. Confirmation publishes one snapshot commit to `agentflare/<thread-id>`
+and creates a draft PR; **Update PR** appends another snapshot to the same branch.
+Local commits, files and staging are untouched; local commit history is not copied.
+The base is the repository default branch at startup, not a user-selectable branch
+yet. Merging, checks and marking ready for review remain on GitHub. Publishing all
+files is supported; partial-file staging/publishing is not part of this UI yet.
+
+Publishing requires user write access and GitHub App **Contents: read/write** plus
+**Pull requests: read/write** permissions (approve updated installation permissions
+after changing the App). A repository-scoped write token is used only in the Worker,
+never in the agent container, and revoked after the operation. The remote branch is
+never force-pushed. A changed checkout requires another review; an externally changed
+remote branch stops publication. Interrupted ref/PR writes can be retried without
+duplicating an already-published commit/PR. The initial limits are 10,000 tree entries
+and 4 MiB of changed blob content relative to the starting base. Workflow permission
+restrictions and repository branch rules can still reject publication.
 
 Use the trash button beside a thread to delete it and destroy its sandbox,
 including uncommitted files and saved agent logins. Confirmation is required.
@@ -29,10 +49,9 @@ retried. Pushed GitHub branches are not deleted.
 
 **Experimental: sandbox disk and agent login state are ephemeral.** After 30 minutes
 idle or a container restart they can be lost; saved thread metadata is not a backup.
-No R2 checkpoints or publish operation yet. Clone credentials are short-lived and
-read-only, not left in Git configuration. Native `git push` requires your own
-repository credentials until controlled publishing is implemented. Do not entrust
-unexported work to this initial runtime.
+No R2 checkpoints yet. Clone credentials are short-lived and read-only, not left
+in Git configuration. The publishing UI does not grant native `git push` access
+to the agent. Do not entrust unpublished work to this initial runtime.
 
 ### Codex sign-in
 
@@ -222,7 +241,7 @@ terminal so the SDK's pre-created PTY delivers SIGWINCH to the CLI. This is a
 local process-level regression check, not a live Cloudflare or agent UI test.
 
 Still needed: R2 checkpoints and restore, encrypted reusable agent credentials,
-controlled publishing, agent restart/stop UX, and per-user runtime budgets.
+agent restart/stop UX, and per-user runtime budgets.
 
 **Publishing must be enforced at the credential boundary.** A confirmation button
 cannot prevent a native CLI from running `git push` if its sandbox already holds

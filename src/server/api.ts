@@ -17,7 +17,7 @@ import { createAuth } from "./auth";
 import { allowedGitHubIds, installationReady, type Bindings } from "./env";
 import { account } from "./db/auth-schema";
 import { project, thread } from "./db/workspace-schema";
-import { repositoryCloneToken } from "./github";
+import { repositoryCloneToken, repositoryWriteToken, github } from "./github";
 import { repositoryPath } from "@/lib/runtime";
 import type { AcpAction } from "@/lib/acp";
 import type { ThreadSandbox } from "./sandbox";
@@ -506,8 +506,17 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
   if (
     !(
       method === "POST"
-        ? ["start"]
-        : ["status", "terminal", "files", "file", "git", "diff"]
+        ? ["start", "publish"]
+        : [
+            "status",
+            "terminal",
+            "files",
+            "file",
+            "git",
+            "diff",
+            "review",
+            "branch-diff",
+          ]
     ).includes(operation)
   )
     return c.notFound();
@@ -534,7 +543,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
     .get();
   if (!owned) return c.notFound();
   let path = "";
-  if (["file", "diff"].includes(operation)) {
+  if (["file", "diff", "branch-diff"].includes(operation)) {
     try {
       path = repositoryPath(c.req.query("path") ?? "");
     } catch {
@@ -549,6 +558,74 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
   const { getSandbox } = await import("@cloudflare/sandbox");
   const sandbox = getSandbox<ThreadSandbox>(c.env.Sandboxes, owned.id);
   if (operation === "status") return c.json(await sandbox.workspaceStatus());
+  if (operation === "publish") {
+    const parsed = z
+      .strictObject({
+        revision: z.string().regex(/^[a-f0-9]{40}$/),
+        title: z.string().trim().min(1).max(200),
+        body: z.string().max(20000),
+      })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success)
+      return c.json(
+        { error: "A reviewed snapshot and a title are required." },
+        400,
+      );
+    const identity = await c
+      .get("db")
+      .select({ id: account.id })
+      .from(account)
+      .where(
+        and(
+          eq(account.userId, c.get("user").id),
+          eq(account.providerId, "github"),
+        ),
+      )
+      .get();
+    if (!identity)
+      return c.json({ error: "Reconnect your GitHub account." }, 403);
+    const userToken = await createAuth(c.env).api.getAccessToken({
+      headers: c.req.raw.headers,
+      body: { accountId: identity.id },
+    });
+    const token = await repositoryWriteToken(
+      c.env,
+      owned.repository,
+      userToken.accessToken,
+    );
+    try {
+      return c.json(
+        await sandbox.publishWorkspace({
+          ...parsed.data,
+          branch: `agentflare/${owned.id}`,
+          token,
+        }),
+      );
+    } catch (error) {
+      const safe = [
+        "Publishing is already in progress.",
+        "Start this thread first.",
+        "The checkout changed. Review the latest changes before publishing.",
+        "This branch has a closed PR or a different PR base. Start a new thread.",
+        "The remote thread branch changed outside Agentflare. Publishing stopped; no force push was attempted.",
+        "GitHub denied repository access. Install the GitHub App on this repository and reauthorize your account.",
+        "GitHub rejected the publish. The branch may have changed, the PR may be closed, or repository rules may block it. Refresh before retrying.",
+      ];
+      return c.json(
+        {
+          error:
+            error instanceof Error && safe.includes(error.message)
+              ? error.message
+              : "Publishing failed. Refresh and retry; any already-pushed commit will be reused. Check App permissions and the 4 MiB / 10000-file publish limits.",
+        },
+        409,
+      );
+    } finally {
+      await github("/installation/token", token, undefined, "DELETE").catch(
+        () => {},
+      );
+    }
+  }
   if (operation === "start") {
     const identity = await c
       .get("db")
@@ -619,6 +696,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
     });
   }
   try {
+    if (operation === "review") return c.json(await sandbox.reviewWorkspace());
     return c.json(
       await sandbox.inspectWorkspace(
         operation,

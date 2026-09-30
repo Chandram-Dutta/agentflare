@@ -1,9 +1,91 @@
-import { readdirSync, realpathSync, readFileSync, statSync } from "node:fs";
+import {
+  readdirSync,
+  realpathSync,
+  readFileSync,
+  statSync,
+  mkdtempSync,
+  rmSync,
+} from "node:fs";
 import { resolve, relative } from "node:path";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-export function inspectRepository(root, { operation, path, staged }) {
+// Build a stable tree without changing the agent's index or working files.
+export function snapshotRepository(root, base, includeBlobs = false) {
+  if (!/^[a-f0-9]{40}$/.test(base)) throw Error("Invalid base");
+  const temp = mkdtempSync(resolve(tmpdir(), "agentflare-index-"));
+  const env = {
+    ...process.env,
+    GIT_INDEX_FILE: resolve(temp, "index"),
+    GIT_NO_REPLACE_OBJECTS: "1",
+  };
+  const git = (...args) =>
+    execFileSync("git", ["--literal-pathspecs", "-C", root, ...args], {
+      env,
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: 15000,
+    });
+  try {
+    git("read-tree", "HEAD");
+    git("add", "-A", "--", ".");
+    const revision = git("write-tree").toString().trim();
+    const changes = git(
+      "diff",
+      "--name-status",
+      "--no-renames",
+      "-z",
+      base,
+      revision,
+    )
+      .toString()
+      .split("\0");
+    const result = {
+      revision,
+      branch: git("branch", "--show-current").toString().trim(),
+      changes: [],
+    };
+    for (let i = 0; i < changes.length - 1; i += 2)
+      result.changes.push({ status: changes[i], path: changes[i + 1] });
+    if (includeBlobs) {
+      const known = new Set(
+        git("ls-tree", "-r", base)
+          .toString()
+          .split("\n")
+          .map((line) => line.split(/[ \t]/)[2]),
+      );
+      let size = 0;
+      const blobs = {};
+      const entries = git("ls-tree", "-rz", revision)
+        .toString()
+        .split("\0")
+        .filter(Boolean)
+        .map((line) => {
+          const split = line.indexOf("\t");
+          const [mode, type, sha] = line.slice(0, split).split(" ");
+          if (type === "blob" && !known.has(sha) && !blobs[sha]) {
+            const content = git("cat-file", "blob", sha);
+            size += content.length;
+            if (size > 4 * 1024 * 1024)
+              throw Error("Publish exceeds 4 MiB of changed content");
+            blobs[sha] = content.toString("base64");
+          }
+          return { mode, type, sha, path: line.slice(split + 1) };
+        });
+      if (entries.length > 10000) throw Error("Publish exceeds 10000 files");
+      Object.assign(result, { entries, blobs });
+    }
+    return result;
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * @returns {{ files?: string[], path?: string, content?: string, patch?: string,
+ * changes?: object[], branch?: string, revision?: string, entries?: object[], blobs?: Record<string, string> }}
+ */
+export function inspectRepository(root, { operation, path, staged, base = "" }) {
   function checkedPath(path) {
     if (
       !path ||
@@ -32,7 +114,29 @@ export function inspectRepository(root, { operation, path, staged }) {
     });
   }
   let result;
-  if (operation === "files") {
+  if (operation === "review" || operation === "snapshot") {
+    result = snapshotRepository(root, base, operation === "snapshot");
+  } else if (operation === "branch-diff") {
+    if (
+      !path ||
+      path.startsWith("/") ||
+      path.split("/").some((p) => p === ".." || p === ".git")
+    )
+      throw Error("Invalid path");
+    const snapshot = snapshotRepository(root, base);
+    result = {
+      patch: git(
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        base,
+        snapshot.revision,
+        "--",
+        path,
+      ),
+    };
+  } else if (operation === "files") {
     const files = [];
     function walk(dir, depth = 0) {
       if (depth > 20) return;

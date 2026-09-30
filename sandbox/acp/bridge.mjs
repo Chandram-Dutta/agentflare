@@ -265,6 +265,11 @@ export function createBridge({
     );
   const agent = connection.agent;
 
+  // Stdio EOF rejects requests before Node necessarily emits child.exit.
+  connection.signal.addEventListener("abort", () => {
+    dead = true;
+    fail();
+  }, { once: true });
   child.on("error", () => {
     dead = true;
     fail();

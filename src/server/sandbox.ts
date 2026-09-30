@@ -2,6 +2,8 @@ import { Sandbox } from "@cloudflare/sandbox";
 import type { AcpAction, AcpSnapshot } from "@/lib/acp";
 import { shellArgument, type RuntimeState } from "@/lib/runtime";
 import type { AgentId } from "@/lib/workspace";
+import type { BranchReview, PublishInput, PublishResult } from "@/lib/runtime";
+import { publishSnapshot, type PublishState } from "./publish";
 
 type StartInput = {
   repository: string;
@@ -14,6 +16,7 @@ type StartInput = {
 export class ThreadSandbox extends Sandbox {
   private starting?: Promise<RuntimeState>;
   private startingAcp?: Promise<AcpSnapshot>;
+  private publishing?: Promise<PublishResult>;
   private startStage = "checking workspace";
   sleepAfter = "30m";
 
@@ -31,7 +34,11 @@ export class ThreadSandbox extends Sandbox {
     // Fence future application operations before waiting for existing startup.
     // The SDK's destroy() preserves this application-owned tombstone.
     await this.ctx.storage.put("app:deleted", true);
-    await Promise.allSettled([this.starting, this.startingAcp]);
+    await Promise.allSettled([
+      this.starting,
+      this.startingAcp,
+      this.publishing,
+    ]);
     await this.destroy();
     await this.ctx.storage.delete("workspace");
   }
@@ -112,6 +119,7 @@ export class ThreadSandbox extends Sandbox {
     };
     this.startStage = "saving workspace state";
     await this.ctx.storage.put("workspace", state);
+    await this.reviewBase();
     return state;
   }
 
@@ -135,8 +143,11 @@ export class ThreadSandbox extends Sandbox {
     if (!(await this.workspaceStatus()).started)
       throw new Error("Start this thread first.");
     await this.requireWorkspace();
+    const base = ["review", "snapshot", "branch-diff"].includes(operation)
+      ? await this.reviewBase()
+      : undefined;
     const input = Buffer.from(
-      JSON.stringify({ operation, path, staged }),
+      JSON.stringify({ operation, path, staged, base: base?.baseSha }),
     ).toString("base64");
     const result = await this.exec(
       `node /opt/agentflare/repository.mjs ${shellArgument(input)}`,
@@ -147,6 +158,61 @@ export class ThreadSandbox extends Sandbox {
         "Repository operation failed. The path may be missing, binary, too large, or outside the checkout.",
       );
     return JSON.parse(result.stdout);
+  }
+
+  private async reviewBase(): Promise<{ baseSha: string; baseBranch: string }> {
+    const saved = await this.ctx.storage.get<{
+      baseSha: string;
+      baseBranch: string;
+    }>("review-base");
+    if (saved) return saved;
+    const result = await this.exec(
+      "git -C /workspace/repo symbolic-ref --short refs/remotes/origin/HEAD && git -C /workspace/repo merge-base HEAD origin/HEAD",
+    );
+    const [ref, baseSha] = result.stdout.trim().split("\n");
+    if (
+      !result.success ||
+      !ref?.startsWith("origin/") ||
+      !/^[a-f0-9]{40}$/.test(baseSha)
+    )
+      throw Error("Cannot determine the thread's base branch.");
+    const base = { baseBranch: ref.slice(7), baseSha };
+    await this.ctx.storage.put("review-base", base);
+    return base;
+  }
+
+  async reviewWorkspace(): Promise<BranchReview> {
+    const review = await this.inspectWorkspace("review");
+    const base = await this.reviewBase();
+    const published = (await this.ctx.storage.get<PublishState>("publish"))
+      ?.result;
+    return { ...review, baseBranch: base.baseBranch, published };
+  }
+
+  async publishWorkspace(
+    input: PublishInput & { branch: string; token: string },
+  ): Promise<PublishResult> {
+    if (this.publishing) throw Error("Publishing is already in progress.");
+    this.publishing = (async () => {
+      const workspace = await this.workspaceStatus();
+      if (!workspace.started || !workspace.repository)
+        throw Error("Start this thread first.");
+      const snapshot = await this.inspectWorkspace("snapshot");
+      const base = await this.reviewBase();
+      return publishSnapshot({
+        ...input,
+        ...base,
+        repository: workspace.repository,
+        snapshot,
+        state: (await this.ctx.storage.get<PublishState>("publish")) ?? {},
+        save: (state) => this.ctx.storage.put("publish", state),
+      });
+    })();
+    try {
+      return await this.publishing;
+    } finally {
+      this.publishing = undefined;
+    }
   }
 
   private disconnectedAcp(): AcpSnapshot {

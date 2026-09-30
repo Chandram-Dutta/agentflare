@@ -1,7 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, verify } from "node:crypto";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
-import { repositoryCloneToken } from "./github";
+import { repositoryCloneToken, repositoryWriteToken } from "./github";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -55,6 +55,33 @@ test("clone credentials require user access, then mint a signed repository-only 
       Buffer.from(jwt[2], "base64url"),
     ),
   ).toBe(true);
+});
+
+test("publishing requires user write access and restricts the App token to one repository", async () => {
+  fetchSpy = spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    Response.json({ id: 987, permissions: { push: false } }),
+  );
+  await expect(
+    repositoryWriteToken(env, "https://github.com/owner/repo", "user-token"),
+  ).rejects.toThrow("write access");
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+  fetchSpy
+    .mockResolvedValueOnce(
+      Response.json({ id: 987, permissions: { push: true } }),
+    )
+    .mockResolvedValueOnce(Response.json({ id: 456 }))
+    .mockResolvedValueOnce(Response.json({ token: "write-token" }));
+  expect(
+    await repositoryWriteToken(
+      env,
+      "https://github.com/owner/repo",
+      "user-token",
+    ),
+  ).toBe("write-token");
+  expect(JSON.parse(String(fetchSpy.mock.calls[3][1]?.body))).toEqual({
+    repository_ids: [987],
+    permissions: { contents: "write", pull_requests: "write" },
+  });
 });
 
 test("denied user access stops before using App authority", async () => {

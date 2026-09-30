@@ -80,3 +80,71 @@ test("inspection rejects traversal, credential metadata, binary files and symlin
     "tracked.txt",
   ]);
 });
+
+test("branch review includes committed, staged, unstaged and untracked files without changing the real index", () => {
+  const base = git("rev-parse", "HEAD").toString().trim();
+  writeFileSync(join(root, "tracked.txt"), "committed\n");
+  git("commit", "-am", "agent commit");
+  writeFileSync(join(root, "other.txt"), "staged\n");
+  git("add", "other.txt");
+  writeFileSync(join(root, "other.txt"), "working\n");
+  writeFileSync(join(root, "new.txt"), "untracked\n");
+  const index = git("write-tree").toString();
+  const review = inspectRepository(root, {
+    operation: "review",
+    path: "",
+    staged: false,
+    base,
+  });
+  expect(review.changes).toEqual([
+    { status: "A", path: "new.txt" },
+    { status: "M", path: "other.txt" },
+    { status: "M", path: "tracked.txt" },
+  ]);
+  expect(git("write-tree").toString()).toBe(index);
+  const diff = inspectRepository(root, {
+    operation: "branch-diff",
+    path: "other.txt",
+    staged: false,
+    base,
+  }).patch;
+  expect(diff).toContain("-other\n+working");
+  expect(diff).not.toContain("+staged");
+  expect(
+    inspectRepository(root, {
+      operation: "branch-diff",
+      path: ":(glob)**",
+      staged: false,
+      base,
+    }).patch,
+  ).toBe("");
+});
+
+test("publish snapshots preserve deletions, binary bytes and symlink targets, not the files they point at", () => {
+  const base = git("rev-parse", "HEAD").toString().trim();
+  rmSync(join(root, "tracked.txt"));
+  const bytes = Buffer.from([0, 255, 10, 13]);
+  writeFileSync(join(root, "binary.dat"), bytes);
+  symlinkSync("/etc/passwd", join(root, "link"));
+  const snapshot = inspectRepository(root, {
+    operation: "snapshot",
+    path: "",
+    staged: false,
+    base,
+  });
+  const entries = snapshot.entries as {
+    path: string;
+    mode: string;
+    sha: string;
+  }[];
+  expect(entries.some((entry) => entry.path === "tracked.txt")).toBe(false);
+  const binary = entries.find((entry) => entry.path === "binary.dat")!;
+  const link = entries.find((entry) => entry.path === "link")!;
+  expect(Buffer.from(snapshot.blobs![binary.sha], "base64")).toEqual(bytes);
+  expect(link.mode).toBe("120000");
+  expect(Buffer.from(snapshot.blobs![link.sha], "base64").toString()).toBe(
+    "/etc/passwd",
+  );
+  const unchanged = entries.find((entry) => entry.path === "other.txt")!;
+  expect(snapshot.blobs![unchanged.sha]).toBeUndefined();
+});

@@ -134,9 +134,12 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
     "git",
     "file?path=README.md",
     "diff?path=README.md",
+    "review",
+    "branch-diff?path=README.md",
+    "publish",
     "start",
   ]) {
-    const method = operation === "start" ? "POST" : "GET";
+    const method = ["start", "publish"].includes(operation) ? "POST" : "GET";
     expect(
       (
         await request(
@@ -148,6 +151,17 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
       ).status,
     ).toBe(404);
   }
+  expect(
+    (
+      await request(
+        `/threads/${thread.id}/runtime/publish`,
+        "POST",
+        {},
+        "alice",
+        { origin: "https://evil.test" },
+      )
+    ).status,
+  ).toBe(403);
   expect(
     (
       await request(

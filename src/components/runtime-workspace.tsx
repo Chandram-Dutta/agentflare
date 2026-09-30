@@ -9,8 +9,9 @@ import { AcpConversation } from "./acp-conversation";
 import { TerminalPreview } from "./terminal-preview";
 import { Button } from "./ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+import { PublishChanges } from "./publish-changes";
 import { apiRequest } from "@/lib/api-client";
-import type { GitChange, RuntimeState } from "@/lib/runtime";
+import type { BranchReview, GitChange, RuntimeState } from "@/lib/runtime";
 
 export function RuntimeWorkspace({
   threadId,
@@ -83,8 +84,8 @@ export function RuntimeWorkspace({
                   Sign in to Codex from the conversation after startup. Sandbox
                   files are temporary and may be lost after 30 minutes idle or a
                   container restart. Export important work before leaving;
-                  thread metadata is not a backup. Git push credentials are not
-                  connected yet.
+                  thread metadata is not a backup. Use Changes to publish a
+                  reviewed snapshot to a draft PR.
                 </p>
               )}
               {threadId && (
@@ -106,6 +107,7 @@ export function RuntimeWorkspace({
         aria-label="Resize agent conversation and file view"
       />
       <RepositoryInspector
+        key={base}
         base={base}
         projectId={projectId}
         started={Boolean(state?.started)}
@@ -158,6 +160,7 @@ function RepositoryInspector({
   const themeType = resolvedTheme === "dark" ? "dark" : "light";
   const [files, setFiles] = useState<string[]>([]);
   const [changes, setChanges] = useState<GitChange[]>([]);
+  const [review, setReview] = useState<BranchReview>();
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -168,46 +171,91 @@ function RepositoryInspector({
     label: string;
   }>();
   const selection = useRef(0);
+  const selected = useRef<{ path: string; staged?: boolean | "branch" }>(
+    undefined,
+  );
   useEffect(() => {
     if (!started) return;
     let cancelled = false;
-    Promise.all([
-      apiRequest<{ files: string[] }>(`${base}/files`),
-      apiRequest<{ changes: GitChange[] }>(`${base}/git`),
-    ])
-      .then(([tree, git]) => {
-        if (!cancelled) {
-          setFiles(tree.files);
-          setChanges(git.changes);
-          setError("");
+    let timer: ReturnType<typeof setTimeout>;
+    let loading = false;
+    async function refresh() {
+      if (loading || cancelled || document.hidden) return;
+      loading = true;
+      try {
+        const [tree, git, branch] = await Promise.all([
+          apiRequest<{ files: string[] }>(`${base}/files`),
+          apiRequest<{ changes: GitChange[] }>(`${base}/git`),
+          apiRequest<BranchReview>(`${base}/review`),
+        ]);
+        if (cancelled) return;
+        setFiles((old) =>
+          JSON.stringify(old) === JSON.stringify(tree.files) ? old : tree.files,
+        );
+        setChanges(git.changes);
+        setReview(branch);
+        setError("");
+        const current = selected.current;
+        const request = selection.current;
+        if (current) {
+          const result = await apiRequest<{ content?: string; patch?: string }>(
+            viewUrl(base, current.path, current.staged),
+          );
+          if (!cancelled && request === selection.current)
+            setView((old) =>
+              old &&
+              (old.content !== result.content || old.patch !== result.patch)
+                ? { ...old, ...result }
+                : old,
+            );
         }
-      })
-      .catch((error: Error) => {
-        if (!cancelled) setError(error.message);
-      });
+      } catch (error) {
+        if (!cancelled)
+          setError(error instanceof Error ? error.message : "Refresh failed.");
+      } finally {
+        loading = false;
+        if (!cancelled) {
+          clearTimeout(timer);
+          timer = setTimeout(refresh, 5000);
+        }
+      }
+    }
+    const visible = () => {
+      if (!document.hidden) {
+        clearTimeout(timer);
+        void refresh();
+      }
+    };
+    document.addEventListener("visibilitychange", visible);
+    void refresh();
     return () => {
       cancelled = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", visible);
     };
   }, [base, revision, started]);
-  async function open(path: string, staged?: boolean) {
+  async function open(path: string, staged?: boolean | "branch") {
     const request = ++selection.current;
+    selected.current = { path, staged };
     setView(undefined);
     setPending(true);
     setError("");
     try {
       const result = await apiRequest<{ content?: string; patch?: string }>(
-        `${base}/${staged === undefined ? "file" : "diff"}?path=${encodeURIComponent(path)}&staged=${staged === true}`,
+        viewUrl(base, path, staged),
       );
       if (request === selection.current)
         setView({
           path,
           ...result,
           label:
-            staged === undefined
-              ? "file"
-              : staged
-                ? "staged diff"
-                : "unstaged diff",
+            staged === "branch"
+              ? "branch diff"
+              : staged === undefined
+                ? "file"
+                : staged
+                  ? "staged diff"
+                  : "unstaged diff",
         });
     } catch (error) {
       if (request === selection.current)
@@ -234,6 +282,7 @@ function RepositoryInspector({
                 aria-label="Close file view"
                 onClick={() => {
                   selection.current++;
+                  selected.current = undefined;
                   setView(undefined);
                 }}
               >
@@ -289,7 +338,8 @@ function RepositoryInspector({
             <div className="flex items-center justify-between border-b">
               <TabsList variant="line" aria-label="Thread inspector">
                 <TabsTrigger value="files">files</TabsTrigger>
-                <TabsTrigger value="git">git stage</TabsTrigger>
+                <TabsTrigger value="changes">changes</TabsTrigger>
+                <TabsTrigger value="git">git</TabsTrigger>
               </TabsList>
               <button
                 type="button"
@@ -303,7 +353,6 @@ function RepositoryInspector({
             <TabsContent value="files" className="min-h-0 overflow-auto">
               {started ? (
                 <RepositoryTree
-                  key={revision}
                   files={files}
                   open={(path) => void open(path)}
                 />
@@ -313,9 +362,47 @@ function RepositoryInspector({
                 </p>
               )}
             </TabsContent>
+            <TabsContent value="changes" className="overflow-auto p-3 text-xs">
+              {review ? (
+                <>
+                  <p className="mb-2 break-words text-muted-foreground">
+                    {review.branch} → {review.baseBranch}
+                  </p>
+                  <p className="mb-3 text-[11px] text-muted-foreground">
+                    All changes since branching, including local commits.
+                    Updates automatically.
+                  </p>
+                  <PublishChanges
+                    base={base}
+                    review={review}
+                    onPublished={() => setRevision((v) => v + 1)}
+                  />
+                  {review.changes.length === 0 && (
+                    <p className="mt-3">No branch changes.</p>
+                  )}
+                  {review.changes.map((change) => (
+                    <button
+                      type="button"
+                      key={change.path}
+                      className="block w-full truncate py-1 text-left hover:text-primary"
+                      onClick={() => void open(change.path, "branch")}
+                    >
+                      {change.status} {change.path}
+                    </button>
+                  ))}
+                </>
+              ) : (
+                <p>
+                  {started
+                    ? "Loading branch changes…"
+                    : "Start a sandbox to review changes."}
+                </p>
+              )}
+            </TabsContent>
             <TabsContent value="git" className="overflow-auto p-3 text-xs">
               <p className="mb-3 text-[11px] text-muted-foreground">
-                Stage and commit in the CLI. Refresh to review.
+                Local staging and commits are managed by the agent. Updates
+                automatically.
               </p>
               {changes.length === 0 && (
                 <p>
@@ -356,4 +443,8 @@ function RepositoryInspector({
       </Panel>
     </>
   );
+}
+
+function viewUrl(base: string, path: string, staged?: boolean | "branch") {
+  return `${base}/${staged === "branch" ? "branch-diff" : staged === undefined ? "file" : "diff"}?path=${encodeURIComponent(path)}&staged=${staged === true}`;
 }
