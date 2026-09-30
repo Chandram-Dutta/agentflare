@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTheme } from "next-themes";
 import { Panel, Separator } from "react-resizable-panels";
+import { RefreshCw, Files, FileDiff, GitBranch } from "lucide-react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { File, PatchDiff } from "@pierre/diffs/react";
 import { AcpConversation } from "./acp-conversation";
@@ -16,15 +17,20 @@ import type { BranchReview, GitChange, RuntimeState } from "@/lib/runtime";
 export function RuntimeWorkspace({
   threadId,
   projectId,
+  hiddenPanes,
   children,
 }: {
   threadId?: string;
   projectId: string;
+  hiddenPanes: string[];
   children: (started: boolean) => ReactNode;
 }) {
   const [state, setState] = useState<RuntimeState>();
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [agentControls, setAgentControls] = useState<HTMLDivElement | null>(
+    null,
+  );
   const base = `/threads/${threadId}/runtime`;
   useEffect(() => {
     if (!threadId) return;
@@ -53,12 +59,25 @@ export function RuntimeWorkspace({
   }
   return (
     <>
-      <Panel id={`${projectId}-terminal`} defaultSize="36%" minSize="300px">
+      <Panel
+        id={`${projectId}-terminal`}
+        defaultSize="36%"
+        minSize="300px"
+        collapsible
+        collapsedSize={0}
+        inert={hiddenPanes.includes("terminal")}
+      >
         <main
           className="flex h-full min-w-0 flex-col overflow-auto"
           aria-label="Thread agent"
         >
-          {children(Boolean(state?.started))}
+          <div className="flex min-h-10 shrink-0 items-center border-b">
+            {children(Boolean(state?.started))}
+            <div
+              ref={setAgentControls}
+              className="flex shrink-0 items-center pr-2"
+            />
+          </div>
           {error && (
             <p role="alert" className="border-b p-3 text-xs text-destructive">
               {error}
@@ -66,7 +85,11 @@ export function RuntimeWorkspace({
           )}
           {state?.started && threadId ? (
             state.agent === "codex" ? (
-              <AcpConversation key={threadId} threadId={threadId} />
+              <AcpConversation
+                key={threadId}
+                threadId={threadId}
+                headerTarget={agentControls}
+              />
             ) : (
               <TerminalPreview threadId={threadId} />
             )
@@ -110,6 +133,7 @@ export function RuntimeWorkspace({
         key={base}
         base={base}
         projectId={projectId}
+        hiddenPanes={hiddenPanes}
         started={Boolean(state?.started)}
       />
     </>
@@ -130,7 +154,7 @@ function RepositoryTree({
   return (
     <FileTree
       model={model}
-      className="block h-full"
+      className="repository-tree block h-full"
       onClick={(event) => {
         // Shadow-root events are retargeted to the host. Activate on every click
         // (including native keyboard activation), not only selection changes.
@@ -151,10 +175,12 @@ function RepositoryInspector({
   base,
   projectId,
   started,
+  hiddenPanes,
 }: {
   base: string;
   projectId: string;
   started: boolean;
+  hiddenPanes: string[];
 }) {
   const { resolvedTheme } = useTheme();
   const themeType = resolvedTheme === "dark" ? "dark" : "light";
@@ -266,7 +292,14 @@ function RepositoryInspector({
   }
   return (
     <>
-      <Panel id={`${projectId}-viewer`} defaultSize="32%" minSize="300px">
+      <Panel
+        id={`${projectId}-viewer`}
+        defaultSize="32%"
+        minSize="300px"
+        collapsible
+        collapsedSize={0}
+        inert={hiddenPanes.includes("viewer")}
+      >
         <section
           className="flex h-full min-w-0 flex-col"
           aria-label="File and diff view"
@@ -329,25 +362,48 @@ function RepositoryInspector({
         className="workspace-divider"
         aria-label="Resize file view and repository navigation"
       />
-      <Panel id={`${projectId}-navigation`} defaultSize="18%" minSize="230px">
+      <Panel
+        id={`${projectId}-navigation`}
+        defaultSize="18%"
+        minSize="230px"
+        collapsible
+        collapsedSize={0}
+        inert={hiddenPanes.includes("navigation")}
+      >
         <aside
           className="flex h-full min-w-0 flex-col"
           aria-label="Thread files and Git stage"
         >
           <Tabs defaultValue="files" className="min-h-0 flex-1 gap-0">
-            <div className="flex items-center justify-between border-b">
-              <TabsList variant="line" aria-label="Thread inspector">
-                <TabsTrigger value="files">files</TabsTrigger>
-                <TabsTrigger value="changes">changes</TabsTrigger>
-                <TabsTrigger value="git">git</TabsTrigger>
+            <div className="flex h-10 shrink-0 items-center justify-between border-b px-1">
+              <TabsList
+                variant="line"
+                aria-label="Thread inspector"
+                className="repository-tabs min-w-0"
+              >
+                <TabsTrigger value="files" aria-label="Files" title="Files">
+                  <Files className="size-3.5" aria-hidden="true" />
+                </TabsTrigger>
+                <TabsTrigger
+                  value="changes"
+                  aria-label="Changes"
+                  title="Changes"
+                >
+                  <FileDiff className="size-3.5" aria-hidden="true" />
+                </TabsTrigger>
+                <TabsTrigger value="git" aria-label="Git" title="Git">
+                  <GitBranch className="size-3.5" aria-hidden="true" />
+                </TabsTrigger>
               </TabsList>
               <button
                 type="button"
-                className="px-3 text-[11px] underline"
+                className="mx-2 shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
+                aria-label="Refresh files and changes"
+                title="Refresh files and changes"
                 disabled={!started}
                 onClick={() => setRevision((v) => v + 1)}
               >
-                refresh
+                <RefreshCw className="size-3.5" />
               </button>
             </div>
             <TabsContent value="files" className="min-h-0 overflow-auto">

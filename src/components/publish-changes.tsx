@@ -104,7 +104,7 @@ export function PublishChanges({
               <p>Restores the branch to its original base snapshot.</p>
             )}
           </div>
-          <label className="space-y-1 text-xs">
+          <label className="flex flex-col gap-1.5 text-xs">
             {published ? "Commit message" : "PR title / commit message"}
             <Input
               value={title}
@@ -115,7 +115,7 @@ export function PublishChanges({
             />
           </label>
           {!published && (
-            <label className="space-y-1 text-xs">
+            <label className="flex flex-col gap-1.5 text-xs">
               PR description
               <textarea
                 className="block min-h-24 w-full border bg-background p-2"

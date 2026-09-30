@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Settings2 } from "lucide-react";
+import { Settings2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -67,20 +67,20 @@ export function ProjectSettings({
         render={
           <Button
             variant="ghost"
-            className="h-8 shrink-0 rounded-none px-2 text-xs font-normal"
+            size="icon-sm"
+            className="rounded-md text-muted-foreground"
+            aria-label={project ? "Project settings" : "New project"}
+            title={project ? "Project settings" : "New project"}
           />
         }
       >
         {project ? (
-          <>
-            <Settings2 className="size-3.5" />
-            project settings
-          </>
+          <Settings2 className="size-3.5" aria-hidden="true" />
         ) : (
-          "+ project"
+          <Plus className="size-3.5" aria-hidden="true" />
         )}
       </DialogTrigger>
-      <DialogContent className="rounded-none border bg-background text-foreground ring-0 sm:max-w-md">
+      <DialogContent className="rounded-lg border bg-background text-foreground ring-0 sm:max-w-md">
         <DialogTitle className="text-sm font-normal">
           {project ? "project settings" : "new project"}
         </DialogTitle>
@@ -128,7 +128,7 @@ export function ProjectSettings({
           <Button
             type="submit"
             variant="outline"
-            className="h-8 rounded-none text-xs font-normal"
+            className="h-8 rounded-md text-xs font-normal"
             disabled={pending}
           >
             {pending ? "saving…" : project ? "save changes" : "create project"}

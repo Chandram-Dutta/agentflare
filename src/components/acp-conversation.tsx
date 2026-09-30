@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { ArrowUp, SquareTerminal, LogOut, Square } from "lucide-react";
+import { createPortal } from "react-dom";
 import { Button } from "./ui/button";
 import { AcpMessages } from "./acp-messages";
 import { AcpComposerControls } from "./acp-composer-controls";
@@ -23,7 +25,13 @@ function safeLoginUrl(value: string): string | null {
   }
 }
 
-export function AcpConversation({ threadId }: { threadId: string }) {
+export function AcpConversation({
+  threadId,
+  headerTarget,
+}: {
+  threadId: string;
+  headerTarget?: HTMLDivElement | null;
+}) {
   const [snapshot, setSnapshot] = useState<AcpSnapshot>();
   const [prompt, setPrompt] = useState("");
   const [networkError, setNetworkError] = useState("");
@@ -129,41 +137,62 @@ export function AcpConversation({ threadId }: { threadId: string }) {
   const loginUrl = snapshot?.login ? safeLoginUrl(snapshot.login.url) : null;
   const idle = snapshot?.status === "ready";
 
+  const status = networkError
+    ? "disconnected"
+    : (snapshot?.status ?? "loading");
+  const controls = (
+    <div className="flex items-center gap-1 text-muted-foreground">
+      <span
+        role="status"
+        aria-label={`Codex: ${status}`}
+        title={`Codex: ${status}`}
+        className="flex items-center gap-1.5 px-1 text-[10px]"
+      >
+        <SquareTerminal className="size-3.5" aria-hidden="true" />
+        <span
+          className={`size-1.5 rounded-full ${idle && !networkError ? "bg-emerald-500" : "bg-primary"}`}
+          aria-hidden="true"
+        />
+        <span>{status}</span>
+      </span>
+      <div className="flex items-center gap-2">
+        {snapshot?.status === "running" && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Stop Codex"
+            title="Stop Codex"
+            disabled={actionPending}
+            onClick={() => void action({ type: "cancel" })}
+          >
+            <Square className="size-3" aria-hidden="true" />
+          </Button>
+        )}
+        {idle && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Sign out of Codex"
+            title="Sign out of Codex"
+            disabled={actionPending}
+            onClick={() => {
+              if (window.confirm("Sign out of native Codex in this sandbox?"))
+                void action({ type: "logout" });
+            }}
+          >
+            <LogOut className="size-3" aria-hidden="true" />
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <section
       className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--terminal)] text-xs"
       aria-label="Codex conversation"
     >
-      <div className="flex min-h-9 items-center justify-between gap-3 border-b px-3">
-        <span className="text-[11px] text-muted-foreground">
-          codex / {snapshot?.status ?? "loading"}
-        </span>
-        <div className="flex items-center gap-2">
-          {snapshot?.status === "running" && (
-            <Button
-              variant="outline"
-              className="h-7 rounded-none text-xs"
-              disabled={actionPending}
-              onClick={() => void action({ type: "cancel" })}
-            >
-              stop
-            </Button>
-          )}
-          {idle && (
-            <Button
-              variant="ghost"
-              className="h-7 rounded-none text-xs font-normal"
-              disabled={actionPending}
-              onClick={() => {
-                if (window.confirm("Sign out of native Codex in this sandbox?"))
-                  void action({ type: "logout" });
-              }}
-            >
-              sign out
-            </Button>
-          )}
-        </div>
-      </div>
+      {headerTarget ? createPortal(controls, headerTarget) : controls}
 
       <div ref={transcript} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-5">
@@ -315,7 +344,7 @@ export function AcpConversation({ threadId }: { threadId: string }) {
         </div>
       </div>
 
-      <form onSubmit={send} className="border-t p-3">
+      <form onSubmit={send} className="border-t px-3 py-2">
         <AcpComposerControls
           options={snapshot?.configOptions}
           contextUsage={snapshot?.contextUsage}
@@ -327,7 +356,7 @@ export function AcpConversation({ threadId }: { threadId: string }) {
             aria-label="Message Codex"
             value={prompt}
             maxLength={16000}
-            rows={3}
+            rows={2}
             disabled={!idle || actionPending}
             placeholder={
               idle ? "Describe a developer task…" : "Codex is not ready"
@@ -337,19 +366,23 @@ export function AcpConversation({ threadId }: { threadId: string }) {
               if (event.key === "Enter" && (event.metaKey || event.ctrlKey))
                 event.currentTarget.form?.requestSubmit();
             }}
-            className="min-h-16 min-w-0 flex-1 resize-y border bg-background p-2 leading-5 outline-offset-2 focus-visible:outline-primary disabled:opacity-60"
+            className="min-h-12 min-w-0 flex-1 resize-y border bg-background p-2 leading-5 outline-offset-2 focus-visible:outline-primary disabled:opacity-60"
           />
           <Button
             type="submit"
             variant="outline"
-            className="rounded-none text-xs"
+            size="icon"
+            aria-label="Send message"
+            title="Send message (Ctrl/⌘ + Enter)"
+            className="rounded-md"
             disabled={!idle || actionPending || !prompt.trim()}
           >
-            send
+            <ArrowUp className="size-4" aria-hidden="true" />
           </Button>
         </div>
-        <p className="mx-auto mt-1 w-full max-w-3xl text-[10px] text-muted-foreground">
-          Ctrl/⌘ + Enter to send · {prompt.length}/16000
+        <p className="mx-auto mt-1 flex w-full max-w-3xl items-center justify-between text-[10px] leading-4 text-muted-foreground">
+          <span title="Ctrl/⌘ + Enter to send">⌘/Ctrl ↵</span>
+          <span>{prompt.length}/16000</span>
         </p>
       </form>
     </section>

@@ -11,6 +11,8 @@
   --font-sans: var(--font-mono);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-popover: var(--background);
+  --color-popover-foreground: var(--foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--background);
   --color-muted: var(--terminal);
@@ -54,10 +56,16 @@
 
 .workspace-input {
   height: 2rem;
-  border-radius: 0;
+  border-radius: 6px;
   background: transparent;
   font-size: 12px;
   box-shadow: none;
+}
+
+.workspace-shell [data-slot="button"],
+.workspace-shell textarea,
+.workspace-shell select {
+  border-radius: 6px;
 }
 
 .workspace-divider {
@@ -99,4 +107,43 @@
   bottom: 0;
   height: 1px;
   background: var(--primary);
+}
+
+.work-tabs .repository-tabs [data-slot="tabs-trigger"] {
+  width: 32px;
+  padding-inline: 0;
+}
+
+.work-tabs .project-tabs,
+.work-tabs .repository-tabs {
+  height: 32px;
+  gap: 2px;
+}
+
+.work-tabs .project-tabs [data-slot="tabs-trigger"],
+.work-tabs .repository-tabs [data-slot="tabs-trigger"] {
+  height: 28px;
+  border-radius: 6px;
+}
+
+.work-tabs .project-tabs [data-slot="tabs-trigger"][data-active],
+.work-tabs .repository-tabs [data-slot="tabs-trigger"][data-active] {
+  background: var(--terminal);
+}
+
+.work-tabs .project-tabs [data-slot="tabs-trigger"]::after,
+.work-tabs .repository-tabs [data-slot="tabs-trigger"]::after {
+  display: none;
+}
+
+.repository-tree {
+  --trees-bg-override: var(--background);
+  --trees-fg-override: var(--foreground);
+  --trees-fg-muted-override: var(--muted-foreground);
+  --trees-border-color-override: var(--border);
+  --trees-accent-override: var(--primary);
+  --trees-selected-bg-override: var(--terminal);
+  --trees-font-family-override: var(--font-mono);
+  --trees-font-size-override: 12px;
+  --trees-border-radius-override: 6px;
 }

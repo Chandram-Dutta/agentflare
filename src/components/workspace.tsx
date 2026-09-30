@@ -1,13 +1,33 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { ThemeProvider, useTheme } from "next-themes";
-import { Moon, Plus, Sun, Trash2 } from "lucide-react";
+import { createPortal } from "react-dom";
+import {
+  Moon,
+  Plus,
+  Sun,
+  Trash2,
+  ListTree,
+  Bot,
+  FileDiff,
+  FolderGit2,
+  LogOut,
+  MessageSquare,
+  Terminal,
+} from "lucide-react";
 import {
   Group,
   Panel,
   Separator,
   useDefaultLayout,
+  useGroupRef,
 } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -106,32 +126,36 @@ function WorkspaceContent() {
     }
   }
 
-  return (
-    <div className="flex min-h-dvh flex-col">
-      <header className="flex h-12 shrink-0 items-center justify-between border-b px-4">
-        <h1 className="text-sm font-normal">
+  function renderHeader(projects?: ReactNode) {
+    return (
+      <header className="flex h-12 min-w-0 shrink-0 items-center gap-3 border-b px-3">
+        <h1 className="shrink-0 text-sm font-normal">
           agentflare<span className="text-primary">_</span>
         </h1>
-        <div className="flex min-w-0 items-center gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-1">{projects}</div>
+        <div className="flex shrink-0 items-center gap-1 text-muted-foreground">
           {session?.user && (
             <>
-              <span className="max-w-32 truncate text-[11px] text-muted-foreground">
+              <span className="mr-2 hidden max-w-24 truncate text-[11px] lg:block">
                 {session.user.name}
               </span>
               <Button
                 variant="ghost"
-                className="h-7 rounded-none text-xs font-normal"
+                size="icon-sm"
+                className="rounded-md"
+                aria-label="Sign out"
+                title="Sign out"
                 disabled={pending}
                 onClick={signOut}
               >
-                sign out
+                <LogOut className="size-3.5" aria-hidden="true" />
               </Button>
             </>
           )}
           <Button
             variant="ghost"
             size="icon-sm"
-            className="rounded-none"
+            className="rounded-md"
             aria-label="Toggle color theme"
             title="Toggle color theme"
             onClick={() =>
@@ -143,6 +167,12 @@ function WorkspaceContent() {
           </Button>
         </div>
       </header>
+    );
+  }
+
+  return (
+    <div className="workspace-shell flex min-h-dvh flex-col">
+      {!session?.user && renderHeader()}
       {error && (
         <div className="flex items-center justify-between gap-4 border-b px-4 py-3 text-xs">
           <p role="alert" className="text-destructive">
@@ -158,7 +188,7 @@ function WorkspaceContent() {
         </div>
       )}
       {session?.user ? (
-        <SavedWorkspace />
+        <SavedWorkspace renderHeader={renderHeader} />
       ) : (
         <main className="mx-auto mt-16 w-full max-w-lg px-6 text-xs sm:mt-28">
           {!session ? (
@@ -203,9 +233,14 @@ function WorkspaceContent() {
   );
 }
 
-function SavedWorkspace() {
+function SavedWorkspace({
+  renderHeader,
+}: {
+  renderHeader: (projects?: ReactNode) => ReactNode;
+}) {
   const [data, setData] = useState<WorkspaceData | null>(null);
   const [selected, setSelected] = useState("");
+  const [paneControls, setPaneControls] = useState<HTMLDivElement | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     let cancelled = false;
@@ -246,24 +281,30 @@ function SavedWorkspace() {
   }
   if (error)
     return (
-      <main className="p-6 text-xs">
-        <p role="alert" className="text-destructive">
-          {error}
-        </p>
-        <Button
-          variant="outline"
-          className="mt-4 rounded-none text-xs"
-          onClick={() => window.location.reload()}
-        >
-          reload
-        </Button>
-      </main>
+      <>
+        {renderHeader()}
+        <main className="p-6 text-xs">
+          <p role="alert" className="text-destructive">
+            {error}
+          </p>
+          <Button
+            variant="outline"
+            className="mt-4 rounded-none text-xs"
+            onClick={() => window.location.reload()}
+          >
+            reload
+          </Button>
+        </main>
+      </>
     );
   if (!data)
     return (
-      <p role="status" className="p-6 text-xs text-muted-foreground">
-        loading projects…
-      </p>
+      <>
+        {renderHeader()}
+        <p role="status" className="p-6 text-xs text-muted-foreground">
+          loading projects…
+        </p>
+      </>
     );
   const active =
     data.projects.find((p) => p.id === selected)?.id ??
@@ -275,30 +316,36 @@ function SavedWorkspace() {
       onValueChange={(value) => setSelected(String(value))}
       className="work-tabs flex-1 gap-0"
     >
-      <div className="flex min-w-0 items-center border-b">
-        {data.projects.length > 0 && (
-          <TabsList
-            variant="line"
-            aria-label="Projects"
-            className="min-w-0 justify-start overflow-x-auto"
-          >
-            {data.projects.map((project) => (
-              <TabsTrigger key={project.id} value={project.id}>
-                {project.name}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        )}
-        <div className="mx-2">
-          <ProjectSettings onSave={savedProject} />
-        </div>
-      </div>
+      {renderHeader(
+        <>
+          {data.projects.length > 0 && (
+            <TabsList
+              variant="line"
+              aria-label="Projects"
+              className="project-tabs min-w-0 justify-start overflow-x-auto"
+            >
+              {data.projects.map((project) => (
+                <TabsTrigger key={project.id} value={project.id}>
+                  {project.name}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          )}
+          <div className="shrink-0">
+            <ProjectSettings onSave={savedProject} />
+          </div>
+          <div
+            ref={setPaneControls}
+            className="ml-auto flex shrink-0 items-center"
+          />
+        </>,
+      )}
       {data.projects.length === 0 && (
         <main className="p-6 text-xs">
           <h2 className="font-normal">no projects yet</h2>
           <p className="mt-2 text-muted-foreground">
-            Add a repository using + project. Your projects are private to your
-            account.
+            Add a repository using the + button. Your projects are private to
+            your account.
           </p>
         </main>
       )}
@@ -311,6 +358,7 @@ function SavedWorkspace() {
         >
           <ProjectWorkspace
             project={project}
+            paneControls={paneControls}
             active={active === project.id}
             threads={data.threads.filter((t) => t.projectId === project.id)}
             onProjectSave={savedProject}
@@ -333,6 +381,7 @@ function SavedWorkspace() {
 
 function ProjectWorkspace({
   project,
+  paneControls,
   active,
   threads,
   onProjectSave,
@@ -340,6 +389,7 @@ function ProjectWorkspace({
   onThreadDelete,
 }: {
   project: Project;
+  paneControls: HTMLDivElement | null;
   active: boolean;
   threads: Thread[];
   onProjectSave: (project: Project) => void;
@@ -353,8 +403,52 @@ function ProjectWorkspace({
   const thread = threads.find((item) => item.id === selected) ?? threads[0];
   const layout = useDefaultLayout({
     id: `agentflare-panes-${project.id}`,
-    onlySaveAfterUserInteractions: true,
   });
+  const groupRef = useGroupRef();
+  const expandedSizes = useRef<Record<string, number>>({});
+  const [hiddenPanes, setHiddenPanes] = useState<string[]>([]);
+  const panes = [
+    { id: "threads", label: "threads", icon: ListTree, min: 160 },
+    { id: "terminal", label: "agent", icon: Bot, min: 300 },
+    { id: "viewer", label: "file / diff", icon: FileDiff, min: 300 },
+    { id: "navigation", label: "files / git", icon: FolderGit2, min: 230 },
+  ];
+
+  function togglePane(id: string) {
+    if (!groupRef.current) return;
+    const sizes = { ...groupRef.current.getLayout() };
+    const key = `${project.id}-${id}`;
+    const others = Object.keys(sizes).filter((k) => k !== key && sizes[k] > 0);
+    if (!others.length) return;
+    const previous = sizes[key];
+    if (previous > 0) expandedSizes.current[key] = previous;
+    const next =
+      previous > 0 ? 0 : Math.min(expandedSizes.current[key] ?? 25, 70);
+    // Redistribute only among visible panes; Panel.collapse() may otherwise
+    // reopen a collapsed neighbour to absorb the freed space.
+    const remaining = others.reduce((sum, k) => sum + sizes[k], 0);
+    for (const k of others) sizes[k] *= (100 - next) / remaining;
+    sizes[key] = next;
+    if (previous === 0) {
+      const visible = panes.filter(
+        (pane) => sizes[`${project.id}-${pane.id}`] > 0,
+      );
+      const minimum = visible.reduce((sum, pane) => sum + pane.min, 0);
+      const width = Math.max(
+        minimum,
+        (document.getElementById(key)?.parentElement?.clientWidth ?? 0) - 15,
+      );
+      // Reserve every visible pane's minimum before distributing spare room.
+      // Otherwise normalization can collapse a neighbour while restoring one.
+      const spare = 100 * (1 - minimum / width);
+      for (const pane of visible) {
+        const paneKey = `${project.id}-${pane.id}`;
+        sizes[paneKey] =
+          (100 * pane.min) / width + (spare * sizes[paneKey]) / 100;
+      }
+    }
+    groupRef.current?.setLayout(sizes);
+  }
 
   async function addThread() {
     setPending(true);
@@ -434,20 +528,68 @@ function ProjectWorkspace({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {paneControls &&
+        createPortal(
+          <div
+            className="flex items-center gap-0.5 border-l pl-2"
+            role="group"
+            aria-label="Visible workspace panes"
+          >
+            {panes.map((pane) => {
+              const hidden = hiddenPanes.includes(pane.id);
+              return (
+                <button
+                  key={pane.id}
+                  type="button"
+                  aria-pressed={!hidden}
+                  aria-controls={`${project.id}-${pane.id}`}
+                  aria-label={`${hidden ? "Show" : "Hide"} ${pane.label} pane`}
+                  title={`${hidden ? "Show" : "Hide"} ${pane.label} pane`}
+                  disabled={!hidden && hiddenPanes.length === 3}
+                  onClick={() => togglePane(pane.id)}
+                  className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-muted hover:text-foreground aria-pressed:text-foreground disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-primary"
+                >
+                  <pane.icon className="size-4" aria-hidden="true" />
+                </button>
+              );
+            })}
+          </div>,
+          paneControls,
+        )}
       <Group
+        groupRef={groupRef}
         orientation="horizontal"
         defaultLayout={layout.defaultLayout}
         onLayoutChanged={layout.onLayoutChanged}
-        className="min-h-[480px] min-w-[1100px]"
-        style={{ height: "calc(100dvh - 89px)" }}
+        onLayoutChange={(sizes) => {
+          const next = ["threads", "terminal", "viewer", "navigation"].filter(
+            (id) => sizes[`${project.id}-${id}`] === 0,
+          );
+          setHiddenPanes((old) => (old.join() === next.join() ? old : next));
+        }}
+        className="min-h-[480px]"
+        style={{
+          height: "calc(100dvh - 48px)",
+          minWidth: panes.reduce(
+            (sum, pane) => sum + (hiddenPanes.includes(pane.id) ? 0 : pane.min),
+            12,
+          ),
+        }}
         aria-label="Workspace panes"
       >
-        <Panel id={`${project.id}-threads`} defaultSize="14%" minSize="160px">
+        <Panel
+          id={`${project.id}-threads`}
+          defaultSize="14%"
+          minSize="160px"
+          collapsible
+          collapsedSize={0}
+          inert={hiddenPanes.includes("threads")}
+        >
           <aside
             className="flex h-full min-w-0 flex-col"
             aria-label={`${project.name} threads`}
           >
-            <div className="flex h-10 items-center justify-between border-b px-4">
+            <div className="flex h-10 items-center justify-between border-b px-3">
               <h2 className="text-xs font-normal">threads</h2>
               <Button
                 variant="ghost"
@@ -470,7 +612,7 @@ function ProjectWorkspace({
                     type="button"
                     aria-current={item.id === thread?.id ? "true" : undefined}
                     onClick={() => setSelected(item.id)}
-                    className={`min-w-0 flex-1 border-l-2 px-3 py-2 text-left text-xs outline-offset-2 focus-visible:outline-primary ${item.id === thread?.id ? "border-primary bg-[var(--terminal)]" : "border-transparent text-muted-foreground hover:bg-[var(--terminal)]"}`}
+                    className={`min-w-0 flex-1 rounded-md px-3 py-2 text-left text-xs outline-offset-2 focus-visible:outline-primary ${item.id === thread?.id ? "bg-[var(--terminal)] text-foreground" : "text-muted-foreground hover:bg-[var(--terminal)]"}`}
                   >
                     <span className="block truncate">{item.name}</span>
                     <span className="mt-1 block text-[10px] text-muted-foreground">
@@ -519,6 +661,7 @@ function ProjectWorkspace({
           key={thread?.id ?? "empty"}
           threadId={thread?.id}
           projectId={project.id}
+          hiddenPanes={hiddenPanes}
         >
           {(started) =>
             thread ? (
@@ -575,14 +718,21 @@ function ThreadControls({
     }
   }
   return (
-    <div className="border-b">
+    <div className="min-w-0 flex-1">
       <form
         onSubmit={save}
         className="flex min-h-10 flex-wrap items-center justify-between gap-2 px-3 py-1"
       >
         <div className="flex min-w-0 basis-full items-center gap-2 sm:flex-1 sm:basis-auto">
-          <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
-            {thread.agent === "codex" ? "conversation /" : "terminal /"}
+          <span
+            className="shrink-0 text-muted-foreground"
+            title={thread.agent === "codex" ? "Conversation" : "Terminal"}
+          >
+            {thread.agent === "codex" ? (
+              <MessageSquare className="size-3.5" aria-hidden="true" />
+            ) : (
+              <Terminal className="size-3.5" aria-hidden="true" />
+            )}
           </span>
           <Input
             aria-label="Thread name"
@@ -594,18 +744,20 @@ function ThreadControls({
             className="workspace-input h-7! min-w-0 max-w-52 border-transparent px-1"
           />
         </div>
-        <select
-          aria-label="Thread agent"
-          value={agent}
-          disabled={pending || started}
-          onChange={(event) => setAgent(event.target.value as AgentId)}
-          className="h-7 max-w-full border bg-background px-2 text-xs outline-offset-2 focus-visible:outline-primary"
-        >
-          {thread.agent === "claude" && (
-            <option value="claude">{agents.claude.name}</option>
-          )}
-          <option value="codex">{agents.codex.name}</option>
-        </select>
+        {!started && (
+          <select
+            aria-label="Thread agent"
+            value={agent}
+            disabled={pending || started}
+            onChange={(event) => setAgent(event.target.value as AgentId)}
+            className="h-7 max-w-full border bg-background px-2 text-xs outline-offset-2 focus-visible:outline-primary"
+          >
+            {thread.agent === "claude" && (
+              <option value="claude">{agents.claude.name}</option>
+            )}
+            <option value="codex">{agents.codex.name}</option>
+          </select>
+        )}
         {dirty && (
           <Button
             type="submit"
