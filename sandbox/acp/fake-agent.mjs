@@ -50,7 +50,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     if (!m.params.clientCapabilities.elicitation.url) process.exit(2);
     reply(m.id, {
       protocolVersion: 1,
-      agentCapabilities: { loadSession: true, auth: { logout: {} } },
+      agentCapabilities: { loadSession: true, auth: { logout: {} }, promptCapabilities: { image: true, audio: true, embeddedContext: true } },
       authMethods: [{ id: "chat-gpt-device-code", name: "ChatGPT" }],
     });
   } else if (m.method === "session/new" || m.method === "session/load") {
@@ -102,6 +102,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }, 100);
   } else if (m.method === "session/prompt") {
     const sessionId = m.params.sessionId;
+    if (m.params.prompt[0].text === "rich" || m.params.prompt[0].type !== "text") {
+      for (const content of m.params.prompt) {
+        update({ sessionUpdate: "agent_message_chunk", content }, sessionId);
+      }
+      update({ sessionUpdate: "tool_call", toolCallId: "rich-tool", title: "Preview", status: "completed",
+        content: m.params.prompt.map(content => ({ type: "content", content })) }, sessionId);
+      return reply(m.id, { stopReason: "end_turn" });
+    }
     if (m.params.prompt[0].text === "crash") return process.exit(1);
     if (m.params.prompt[0].text === "long") {
       for (let i = 0; i < 4; i++) {

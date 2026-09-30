@@ -3,6 +3,7 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.284 @openai/codex@0.159.1
 COPY sandbox/acp/package.json sandbox/acp/package-lock.json /opt/agentflare/acp/
 RUN cd /opt/agentflare/acp && npm ci --omit=dev --ignore-scripts
 COPY sandbox/acp/bridge.mjs /opt/agentflare/acp/bridge.mjs
+COPY sandbox/acp/content.mjs /opt/agentflare/acp/content.mjs
 COPY sandbox/acp/auth-checkpoint.mjs /opt/agentflare/acp/auth-checkpoint.mjs
 COPY sandbox/repository.mjs /opt/agentflare/repository.mjs
 COPY sandbox/launch-agent.sh /opt/agentflare/launch-agent.sh

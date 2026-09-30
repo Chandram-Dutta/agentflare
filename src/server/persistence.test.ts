@@ -209,7 +209,8 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
   for (const [length, status] of [
     [16000, 503],
     [16001, 400],
-    [100001, 413],
+    [100001, 400],
+    [2100001, 413],
   ]) {
     expect(
       (
@@ -221,6 +222,18 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
       ).status,
     ).toBe(status);
   }
+  expect(
+    (
+      await request(`/threads/${thread.id}/runtime/acp`, "POST", {
+        type: "prompt",
+        text: "",
+        requestId: "attachment",
+        attachments: [
+          { type: "image", mimeType: "image/png", data: "a".repeat(120000) },
+        ],
+      })
+    ).status,
+  ).toBe(503);
   expect(
     (
       await request(

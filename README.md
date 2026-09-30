@@ -213,6 +213,17 @@ For Codex it renders structured ACP messages and explicit permission choices;
 the adapter and Codex own model/tool execution and native authentication. The
 legacy terminal path remains only for existing Claude threads.
 
+ACP conversations preserve image, audio, embedded-resource and resource-link
+blocks in messages and tool output. The composer offers attachments only for
+capabilities advertised by the agent, including attachment-only prompts. Draft
+attachments stay in memory per thread and clear after an accepted send. Up to
+four files fit within a combined 2 MB encoded payload (about 1.4 MB of binary
+files); text resources are limited to 64,000 characters. Rich transcript payloads
+are bounded separately, with visible omission notices. Images use supported
+raster formats, audio uses native playback controls, text resources remain
+literal, and binary resources can be downloaded. Local resource links are shown
+as references rather than fetched by the browser.
+
 The repository UI uses [`@pierre/trees`](https://trees.software/docs) for file
 navigation and [`@pierre/diffs`](https://diffs.com/docs) for file/diff rendering.
 Both declare Apache-2.0 licensing and React 19 support; Trees is currently beta.

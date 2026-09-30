@@ -2,6 +2,43 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AcpMessages } from "./acp-messages";
 
+test("rich blocks render inline media, literal resources and safe resource links", () => {
+  const html = renderToStaticMarkup(
+    <AcpMessages
+      messages={[
+        {
+          id: "rich",
+          role: "assistant",
+          text: "",
+          content: [
+            { type: "image", mimeType: "image/png", data: "aGk=" },
+            { type: "audio", mimeType: "audio/wav", data: "aGk=" },
+            {
+              type: "resource",
+              resource: { uri: "file:///note", text: "<script>bad()</script>" },
+            },
+            {
+              type: "resource_link",
+              uri: "javascript:alert(1)",
+              name: "unsafe",
+            },
+            {
+              type: "resource_link",
+              uri: "https://example.com/file",
+              name: "safe",
+            },
+          ],
+        },
+      ]}
+    />,
+  );
+  expect(html).toContain('src="data:image/png;base64,aGk="');
+  expect(html).toContain("<audio");
+  expect(html).toContain("&lt;script&gt;");
+  expect(html).not.toContain('href="javascript:');
+  expect(html).toContain('href="https://example.com/file"');
+});
+
 test("tool disclosures use reported statuses and collapse only completed calls", () => {
   for (const status of [
     "completed",

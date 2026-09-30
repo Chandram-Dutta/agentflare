@@ -3,6 +3,7 @@
 import { useId, useState } from "react";
 import { ChevronRight, Terminal } from "lucide-react";
 import type { AcpMessage } from "@/lib/acp";
+import { AcpContent } from "./acp-content";
 import { ChatMarkdown } from "./chat-markdown";
 
 function ToolMessage({ message }: { message: AcpMessage }) {
@@ -55,7 +56,9 @@ function ToolMessage({ message }: { message: AcpMessage }) {
         )}
       </button>
       <div id={outputId} hidden={!open} className="pb-3 pl-7 pr-2">
-        {output ? (
+        {message.content?.length ? (
+          <AcpContent blocks={message.content} literal />
+        ) : output ? (
           <pre
             tabIndex={0}
             role="region"
@@ -98,7 +101,11 @@ export function AcpMessages({ messages }: { messages: AcpMessage[] }) {
                 )}
               </summary>
               <div className="ml-1.5 mt-3 border-l pl-4">
-                <ChatMarkdown>{message.text}</ChatMarkdown>
+                {message.content?.length ? (
+                  <AcpContent blocks={message.content} />
+                ) : (
+                  <ChatMarkdown>{message.text}</ChatMarkdown>
+                )}
               </div>
             </details>
           );
@@ -118,7 +125,11 @@ export function AcpMessages({ messages }: { messages: AcpMessage[] }) {
               </span>
               {message.status && <span>/ {message.status}</span>}
             </header>
-            <ChatMarkdown>{message.text}</ChatMarkdown>
+            {message.content?.length ? (
+              <AcpContent blocks={message.content} />
+            ) : (
+              <ChatMarkdown>{message.text}</ChatMarkdown>
+            )}
           </article>
         );
       })}

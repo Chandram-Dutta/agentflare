@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, type FormEvent } from "react";
 import { ArrowUp, SquareTerminal, LogOut, Square } from "lucide-react";
 import { createPortal } from "react-dom";
 import { Button } from "./ui/button";
+import { AcpAttachments } from "./acp-attachments";
 import { AcpMessages } from "./acp-messages";
 import { AcpComposerControls } from "./acp-composer-controls";
 import type { AcpAction } from "@/lib/acp";
@@ -34,6 +35,7 @@ export function AcpConversation({
   const {
     snapshot,
     draft: prompt,
+    attachments,
     error: networkError,
     pending: actionPending,
   } = useThreadState(threadId);
@@ -63,10 +65,16 @@ export function AcpConversation({
   async function send(event: FormEvent) {
     event.preventDefault();
     const text = prompt.trim();
-    if (!text || snapshot?.status !== "ready" || actionPending) return;
+    if (
+      (!text && !attachments?.length) ||
+      snapshot?.status !== "ready" ||
+      actionPending
+    )
+      return;
     await action({
       type: "prompt",
       text,
+      attachments,
       requestId: crypto.randomUUID(),
     });
   }
@@ -307,6 +315,13 @@ export function AcpConversation({
           disabled={!idle || actionPending}
           onAction={(value) => void action(value)}
         />
+        <AcpAttachments
+          key={threadId}
+          attachments={attachments ?? []}
+          capabilities={snapshot?.promptCapabilities}
+          disabled={!idle || actionPending}
+          onChange={(attachments) => store.update(threadId, { attachments })}
+        />
         <div className="mx-auto flex w-full max-w-3xl items-end gap-2">
           <textarea
             aria-label="Message Codex"
@@ -331,7 +346,9 @@ export function AcpConversation({
             aria-label="Send message"
             title="Send message (Ctrl/⌘ + Enter)"
             className="rounded-md"
-            disabled={!idle || actionPending || !prompt.trim()}
+            disabled={
+              !idle || actionPending || (!prompt.trim() && !attachments?.length)
+            }
           >
             <ArrowUp className="size-4" aria-hidden="true" />
           </Button>

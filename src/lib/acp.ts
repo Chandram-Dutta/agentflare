@@ -1,8 +1,13 @@
+import type { ContentBlock } from "@agentclientprotocol/sdk";
+
+export type AcpContent = ContentBlock;
+
 export type AcpMessage = {
   id: string;
   role: "user" | "assistant" | "thought" | "tool";
   text: string;
   status?: string;
+  content?: AcpContent[];
 };
 
 export type AcpActivity = {
@@ -40,13 +45,23 @@ export type AcpSnapshot = {
     currentValue: string;
     options: { value: string; name: string; description?: string }[];
   }[];
+  promptCapabilities?: {
+    image?: boolean;
+    audio?: boolean;
+    embeddedContext?: boolean;
+  };
   contextUsage?: { used: number; size: number };
 };
 
 export type AcpAction =
   | { type: "connect" }
   | { type: "authenticate" }
-  | { type: "prompt"; text: string; requestId: string }
+  | {
+      type: "prompt";
+      text: string;
+      requestId: string;
+      attachments?: AcpContent[];
+    }
   | { type: "set-config"; configId: string; value: string }
   | { type: "cancel" }
   | { type: "permission"; id: string; optionId: string }

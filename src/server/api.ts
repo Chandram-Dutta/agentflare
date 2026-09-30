@@ -20,6 +20,7 @@ import { account } from "./db/auth-schema";
 import { project, thread } from "./db/workspace-schema";
 import { repositoryCloneToken, repositoryWriteToken, github } from "./github";
 import { repositoryPath } from "@/lib/runtime";
+import { promptActionSchema } from "@/lib/acp-content";
 import type { AcpAction } from "@/lib/acp";
 import type { ThreadSandbox } from "./sandbox";
 
@@ -204,7 +205,7 @@ api.use(
   (c, next) =>
     bodyLimit({
       maxSize: /^\/api\/threads\/[^/]+\/runtime\/acp$/.test(c.req.path)
-        ? 100000
+        ? 2_100_000
         : 4096,
     })(c, next),
   async (c, next) => {
@@ -485,11 +486,7 @@ const acpAction = z.discriminatedUnion("type", [
     configId: z.string().min(1).max(128),
     value: z.string().max(256),
   }),
-  z.strictObject({
-    type: z.literal("prompt"),
-    text: z.string().trim().min(1).max(16000),
-    requestId: z.string().min(1).max(128),
-  }),
+  promptActionSchema,
   z.strictObject({ type: z.literal("cancel") }),
   z.strictObject({
     type: z.literal("permission"),
