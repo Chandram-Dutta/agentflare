@@ -8,6 +8,13 @@
       "when": 1790696506746,
       "tag": "0000_right_psynapse",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790765047928,
+      "tag": "0001_strong_scalphunter",
+      "breakpoints": true
     }
   ]
 }

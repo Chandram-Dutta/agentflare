@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
+import { createAuthCheckpoint } from "./auth-checkpoint.mjs";
 
 // The bridge owns the conversation, not a browser connection. Only this fixed
 // application protocol is exposed to the Worker, never arbitrary ACP requests.
@@ -453,32 +454,317 @@ export function createBridge({
   };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// One ACP transport is shared by all conversations belonging to a user.  The
+// ACP session id (rather than the HTTP connection) is the routing boundary.
+export function createUserBridge({
+  command = ["/opt/agentflare/acp/node_modules/.bin/codex-acp"],
+  root = "/workspace/threads",
+} = {}) {
+  const contexts = new Map();
+  const routes = new Map();
+  const deleted = new Set();
+  let initialized;
+  let dead = false;
+  let authentication;
+  let login;
+  let loginResolve;
+  let loggingOut = false;
+  const child = spawn(command[0], command.slice(1), {
+    cwd: root,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...Object.fromEntries(["PATH", "HOME", "LANG", "TERM", "CODEX_HOME"].flatMap(
+        (key) => process.env[key] === undefined ? [] : [[key, process.env[key]]],
+      )),
+      NO_BROWSER: "1",
+    },
+  });
+  child.stderr.resume();
+
+  const normalize = (options = [], modes) => {
+    const result = (Array.isArray(options) ? options : []).flatMap((o) => {
+      if (o?.type !== "select" || typeof o.id !== "string" || typeof o.name !== "string" ||
+          typeof o.currentValue !== "string" || !Array.isArray(o.options)) return [];
+      const choices = o.options.flatMap((x) => Array.isArray(x?.options) ? x.options : [x])
+        .flatMap((x) => typeof x?.value === "string" && typeof x.name === "string"
+          ? [{ value: x.value, name: x.name, ...(typeof x.description === "string" ? { description: x.description } : {}) }]
+          : []);
+      if (!choices.some((x) => x.value === o.currentValue)) return [];
+      return [{ id: o.id, name: o.name, currentValue: o.currentValue, options: choices,
+        ...(typeof o.category === "string" ? { category: o.category } : {}),
+        ...(typeof o.description === "string" ? { description: o.description } : {}) }];
+    });
+    if (!result.some((o) => o.id === "mode") && modes?.availableModes) {
+      const choices = modes.availableModes.flatMap((x) => typeof x?.id === "string" && typeof x.name === "string"
+        ? [{ value: x.id, name: x.name }] : []);
+      if (choices.some((x) => x.value === modes.currentModeId))
+        result.unshift({ id: "mode", name: "Mode", category: "mode", currentValue: modes.currentModeId, options: choices });
+    }
+    return result;
+  };
+  const bound = (s) => {
+    let size = s.messages.reduce((n, m) => n + m.text.length, 0);
+    while (s.messages.length > 1 && (size > 128000 || s.messages.length > 300)) {
+      size -= s.messages.shift().text.length;
+      s.truncated = true;
+    }
+  };
+  const append = (c, role, text, id = crypto.randomUUID(), status) => {
+    if (text.length > 64000) c.snapshot.truncated = true;
+    c.snapshot.messages.push({ id, role, text: text.slice(0, 64000), ...(status ? { status } : {}) });
+    bound(c.snapshot);
+  };
+  const settle = (c) => {
+    for (const p of c.permissions.values()) p.resolve({ outcome: { outcome: "cancelled" } });
+    c.permissions.clear();
+    c.snapshot.permissions = [];
+  };
+  const fail = (c, error) => {
+    settle(c);
+    c.snapshot.status = !dead && error?.code === -32000 ? "auth-required" : "error";
+    if (c.snapshot.status === "error") c.snapshot.error = "Codex could not continue. Reconnect to reload this session.";
+    else delete c.snapshot.error;
+  };
+  const failAll = () => {
+    if (dead) return;
+    dead = true;
+    if (loginResolve) loginResolve({ action: "cancel" });
+    for (const c of contexts.values()) fail(c);
+  };
+  const update = (c, u) => {
+    const s = c.snapshot;
+    if (["agent_message_chunk", "user_message_chunk", "agent_thought_chunk"].includes(u.sessionUpdate)) {
+      if (u.content?.type !== "text") return;
+      const role = u.sessionUpdate === "agent_message_chunk" ? "assistant" : u.sessionUpdate === "agent_thought_chunk" ? "thought" : "user";
+      const last = s.messages.at(-1);
+      if (last && last.id === c.currentMessage && last.role === role) {
+        if (last.text.length + u.content.text.length > 64000) s.truncated = true;
+        last.text = (last.text + u.content.text).slice(0, 64000);
+      }
+      else { c.currentMessage = crypto.randomUUID(); append(c, role, u.content.text, c.currentMessage); }
+    } else if (u.sessionUpdate === "config_option_update") {
+      const before = s.configOptions.find(o => o.id === "model" || o.category === "model")?.currentValue;
+      s.configOptions = normalize(u.configOptions);
+      if (before !== s.configOptions.find(o => o.id === "model" || o.category === "model")?.currentValue) delete s.contextUsage;
+    } else if (u.sessionUpdate === "current_mode_update") {
+      const mode = s.configOptions.find(o => o.id === "mode");
+      if (mode?.options.some(o => o.value === u.currentModeId)) mode.currentValue = u.currentModeId;
+    }
+    else if (u.sessionUpdate === "usage_update" && Number.isFinite(u.used) && u.used >= 0 && Number.isFinite(u.size) && u.size > 0)
+      s.contextUsage = { used: u.used, size: u.size };
+    else if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
+      c.currentMessage = undefined;
+      let item = s.messages.find((m) => m.role === "tool" && m.id === u.toolCallId);
+      if (!item) { append(c, "tool", u.title ?? "Tool call", u.toolCallId, u.status ?? "pending"); item = s.messages.at(-1); }
+      if (u.title) item.text = u.title.slice(0, 64000);
+      if (u.status) item.status = u.status;
+      const text = u.content?.filter(x => x.type === "content" && x.content?.type === "text").map(x => x.content.text).join("\n");
+      if (text) item.text = `${u.title ?? item.text.split("\n")[0]}\n${text}`.slice(0, 64000);
+    }
+    bound(s);
+  };
+
+  const connection = client({ name: "agentflare" })
+    .onNotification(methods.client.session.update, (ctx) => {
+      const c = routes.get(ctx.params.sessionId);
+      if (c) update(c, ctx.params.update);
+    })
+    .onRequest(methods.client.session.requestPermission, (ctx) => new Promise((resolve) => {
+      const c = routes.get(ctx.params.sessionId);
+      const p = ctx.params;
+      if (!c || c.snapshot.status !== "running" || c.permissions.size >= 32 || !p.options?.length)
+        return resolve({ outcome: { outcome: "cancelled" } });
+      const id = crypto.randomUUID();
+      const options = p.options.map(({ optionId, name, kind }) => ({ optionId, name, kind }));
+      c.permissions.set(id, { resolve, options });
+      c.snapshot.permissions.push({ id, title: p.toolCall.title, options });
+    }))
+    .onRequest(methods.client.elicitation.create, (ctx) => new Promise((resolve) => {
+      let url;
+      try { url = new URL(ctx.params.url); } catch { /* invalid */ }
+      if (!authentication || loginResolve || ctx.params.mode !== "url" || url?.protocol !== "https:" ||
+          url.username || url.password || !["auth.openai.com", "chatgpt.com"].includes(url.hostname))
+        return resolve({ action: "cancel" });
+      loginResolve = resolve;
+      login = { id: ctx.params.elicitationId, url: url.href, message: ctx.params.message.slice(0, 2000) };
+      for (const c of contexts.values()) if (c.snapshot.status === "authenticating") c.snapshot.login = login;
+    }))
+    .onNotification(methods.client.elicitation.complete, (ctx) => {
+      if (login?.id === ctx.params.elicitationId) {
+        login = undefined;
+        for (const c of contexts.values()) delete c.snapshot.login;
+      }
+    })
+    .connect(ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)));
+  const agent = connection.agent;
+  connection.signal.addEventListener("abort", failAll, { once: true });
+  child.on("error", failAll);
+  child.on("exit", failAll);
+  const init = agent.request(methods.agent.initialize, {
+    protocolVersion: 1, clientCapabilities: { elicitation: { url: {} } },
+    clientInfo: { name: "agentflare", version: "1" },
+  }).then((x) => {
+    if (x.protocolVersion !== 1) throw new Error("Unsupported ACP version");
+    initialized = x;
+  }).catch((e) => { failAll(); throw e; });
+  void init.catch(() => {});
+
+  async function open(c) {
+    let saved;
+    try { saved = (await readFile(c.sessionFile, "utf8")).trim(); }
+    catch (e) { if (e.code !== "ENOENT") throw e; }
+    c.currentMessage = undefined;
+    let result;
+    if (saved) {
+      c.sessionId = saved;
+      routes.set(saved, c); // load may replay notifications before its response
+      c.snapshot.messages = [];
+      try { result = await agent.request(methods.agent.session.load, { sessionId: saved, cwd: c.cwd, mcpServers: [] }); }
+      catch (e) { routes.delete(saved); throw e; }
+    } else {
+      result = await agent.request(methods.agent.session.new, { cwd: c.cwd, mcpServers: [] });
+      c.sessionId = result.sessionId;
+      routes.set(c.sessionId, c);
+      await mkdir(dirname(c.sessionFile), { recursive: true, mode: 0o700 });
+      await writeFile(`${c.sessionFile}.tmp`, c.sessionId, { mode: 0o600 });
+      await rename(`${c.sessionFile}.tmp`, c.sessionFile);
+    }
+    c.snapshot.configOptions = normalize(result.configOptions, result.modes);
+    if (dead || c.deleted) throw Error("Disconnected");
+    c.snapshot.status = "ready";
+    delete c.snapshot.error;
+  }
+  async function authenticate() {
+    if (authentication) return authentication;
+    if (!initialized?.authMethods?.some(m => m.id === "chat-gpt-device-code")) throw Error("Device login unavailable");
+    for (const c of contexts.values()) if (c.snapshot.status === "auth-required") c.snapshot.status = "authenticating";
+    authentication = agent.request(methods.agent.authenticate, { methodId: "chat-gpt-device-code" })
+      .then(async () => {
+        const retry = [...contexts.values()].filter((c) => ["auth-required", "authenticating"].includes(c.snapshot.status));
+        await Promise.all(retry.map((c) => open(c).catch((e) => fail(c, e))));
+      }).catch((e) => { for (const c of contexts.values()) if (c.snapshot.status === "authenticating") fail(c, e); })
+      .finally(() => { authentication = undefined; login = undefined; loginResolve = undefined; for (const c of contexts.values()) delete c.snapshot.login; });
+    return authentication;
+  }
+  async function act(c, action) {
+    if (dead || c.deleted || loggingOut) throw new Error("Disconnected");
+    if (action.type === "authenticate") {
+      if (c.snapshot.status !== "auth-required" && c.snapshot.status !== "authenticating") throw new Error("Not ready for login");
+      void authenticate().catch(e => fail(c, e));
+    } else if (action.type === "login-response") {
+      if (!login || login.id !== action.id || !loginResolve) throw new Error("Login request expired");
+      const resolve = loginResolve; loginResolve = undefined; resolve({ action: action.action });
+      if (action.action === "cancel") { login = undefined; for (const x of contexts.values()) delete x.snapshot.login; }
+    } else if (action.type === "prompt") {
+      if (c.promptIds.has(action.requestId)) return;
+      if (c.snapshot.status !== "ready" || typeof action.text !== "string" || !action.text.trim() || action.text.length > 16000 || typeof action.requestId !== "string") throw new Error("Cannot send prompt");
+      c.promptIds.add(action.requestId); if (c.promptIds.size > 1000) c.promptIds.delete(c.promptIds.values().next().value);
+      append(c, "user", action.text, action.requestId); c.currentMessage = undefined; c.snapshot.status = "running";
+      c.prompt = agent.request(methods.agent.session.prompt, { sessionId: c.sessionId, prompt: [{ type: "text", text: action.text }] })
+        .then(() => { settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; }).catch((e) => fail(c, e));
+    } else if (action.type === "permission") {
+      const p = c.permissions.get(action.id);
+      if (!p || !p.options.some((x) => x.optionId === action.optionId)) throw new Error("Permission request expired or invalid choice");
+      c.permissions.delete(action.id); c.snapshot.permissions = c.snapshot.permissions.filter((x) => x.id !== action.id);
+      p.resolve({ outcome: { outcome: "selected", optionId: action.optionId } });
+    } else if (action.type === "cancel") {
+      if (c.snapshot.status === "running") { settle(c); await agent.notify(methods.agent.session.cancel, { sessionId: c.sessionId }); }
+    } else if (action.type === "set-config") {
+      if (c.snapshot.status !== "ready") throw new Error("Cannot change configuration while busy");
+      const option = c.snapshot.configOptions.find((x) => x.id === action.configId);
+      if (!option?.options.some((x) => x.value === action.value)) throw new Error("Configuration option or value is unavailable");
+      c.snapshot.status = "configuring";
+      try { const r = await agent.request(methods.agent.session.setConfigOption, { sessionId: c.sessionId, configId: action.configId, value: action.value }); c.snapshot.configOptions = normalize(r.configOptions); if (option.id === "model" || option.category === "model") delete c.snapshot.contextUsage; if (!dead && !c.deleted) c.snapshot.status = "ready"; }
+      catch (e) { if (!dead) c.snapshot.status = "ready"; throw e; }
+    } else if (action.type === "logout") {
+      if (!initialized?.agentCapabilities?.auth?.logout || [...contexts.values()].some((x) => ["running", "authenticating", "configuring", "connecting"].includes(x.snapshot.status))) throw new Error("Sign-out unavailable while busy");
+      loggingOut = true;
+      try {
+        await agent.request(methods.agent.logout, {});
+        for (const x of contexts.values()) { settle(x); x.snapshot.status = "auth-required"; delete x.snapshot.login; }
+      } finally { loggingOut = false; }
+    } else throw new Error("Unknown action");
+  }
+  async function session(threadId) {
+    if (!UUID.test(threadId)) throw new Error("Invalid thread id");
+    if (loggingOut || dead || deleted.has(threadId)) throw Error("Disconnected");
+    if (contexts.has(threadId)) return contexts.get(threadId).public;
+    const c = { snapshot: { status: "connecting", messages: [], permissions: [], configOptions: [] }, permissions: new Map(), promptIds: new Set(), cwd: `${root}/${threadId}/repo`, sessionFile: `${root}/${threadId}/acp-session` };
+    c.public = { snapshot: c.snapshot, act: (a) => act(c, a) };
+    contexts.set(threadId, c);
+    c.public.ready = init.then(() => open(c)).catch((e) => {
+      fail(c, e);
+      if (authentication && c.snapshot.status === "auth-required") {
+        c.snapshot.status = "authenticating";
+        if (login) c.snapshot.login = login;
+      }
+    });
+    await Promise.resolve();
+    return c.public;
+  }
+  return { session, isAlive: () => !dead, async deleteSession(threadId) {
+    if (!UUID.test(threadId)) throw new Error("Invalid thread id");
+    deleted.add(threadId);
+    const c = contexts.get(threadId); if (!c) return;
+    c.deleted = true; settle(c); contexts.delete(threadId); if (c.sessionId) { routes.delete(c.sessionId); if (c.snapshot.status === "running") await agent.notify(methods.agent.session.cancel, { sessionId: c.sessionId }); }
+    await c.public.ready;
+    await c.prompt;
+    if (c.sessionId) routes.delete(c.sessionId);
+  }, async close() { dead = true; if (loginResolve) loginResolve({ action: "cancel" }); for (const c of contexts.values()) settle(c); child.kill(); await connection.close(); } };
+}
+
 if (import.meta.main) {
-  const bridge = createBridge();
+  const shared = process.env.AGENTFLARE_SHARED_RUNTIME === "1";
+  const checkpoint = shared ? createAuthCheckpoint({ path: `${process.env.CODEX_HOME}/auth.json`, url: process.env.AGENTFLARE_AUTH_CALLBACK, token: process.env.AGENTFLARE_AUTH_CAPABILITY }) : undefined;
+  const bridge = shared ? createUserBridge() : createBridge();
   const server = Bun.serve({
     hostname: "0.0.0.0", // Reachable only through the authenticated Worker/DO.
     port: 8766,
     maxRequestBodySize: 100000,
     async fetch(request) {
-      if (new URL(request.url).pathname !== "/acp")
-        return new Response(null, { status: 404 });
+      const path = new URL(request.url).pathname;
+      if (shared && path === "/health") return new Response(null, { status: bridge.isAlive() ? 204 : 503 });
+      let target = bridge;
+      let threadId;
+      if (shared) {
+        const match = path.match(/^\/acp\/([^/]+)$/);
+        if (!match || !UUID.test(match[1])) return new Response(null, { status: 404 });
+        threadId = match[1];
+        try {
+          if (request.method === "DELETE") {
+            await bridge.deleteSession(threadId);
+            return new Response(null, { status: 204 });
+          }
+          target = await bridge.session(threadId);
+        } catch {
+          return Response.json({ error: "ACP session could not be opened." }, { status: 409 });
+        }
+      } else if (path !== "/acp") return new Response(null, { status: 404 });
       if (request.method === "POST") {
         try {
-          await bridge.act(await request.json());
-        } catch {
+          await target.act(await request.json());
+        } catch (error) {
           return Response.json(
-            { error: "ACP action could not be applied." },
+            { error: error.message === "Sign-out unavailable while busy" ? "Stop all running Codex threads before signing out." : "ACP action could not be applied." },
             { status: 409 },
           );
         }
       } else if (request.method !== "GET")
         return new Response(null, { status: 405 });
-      return Response.json(bridge.snapshot, {
+      let authPersistence;
+      if (checkpoint) {
+        try { await checkpoint.sync(); authPersistence = "saved"; }
+        catch { authPersistence = "pending"; }
+      }
+      return Response.json({ ...target.snapshot, ...(shared ? { authScope: "user", authPersistence } : {}) }, {
         headers: { "Cache-Control": "no-store" },
       });
     },
   });
   process.on("SIGTERM", () => {
+    checkpoint?.stop();
     server.stop(true);
     void bridge.close().finally(() => process.exit(0));
   });

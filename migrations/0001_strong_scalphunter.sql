@@ -1,0 +1,1 @@
+ALTER TABLE `thread` ADD `runtime` text DEFAULT 'thread' NOT NULL;

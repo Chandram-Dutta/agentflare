@@ -47,6 +47,7 @@ export type Project = z.infer<typeof projectInput> & {
 };
 export type Thread = z.infer<typeof threadInput> & {
   id: string;
+  runtime?: "thread" | "user";
   projectId: string;
   version: number;
   createdAt: number;

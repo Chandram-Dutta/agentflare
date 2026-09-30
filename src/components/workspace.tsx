@@ -501,9 +501,9 @@ function ProjectWorkspace({
         <DialogContent showCloseButton={!pending}>
           <DialogTitle>Delete {deleteTarget?.name}?</DialogTitle>
           <DialogDescription>
-            This permanently deletes the thread and destroys its sandbox,
-            including uncommitted files and saved agent logins. Pushed GitHub
-            branches are not deleted.
+            {deleteTarget?.runtime === "user"
+              ? "This permanently deletes this thread's workspace and uncommitted files. Your shared Codex login and other threads are kept. Pushed GitHub branches are not deleted."
+              : "This permanently deletes the thread and destroys its sandbox, including uncommitted files and saved agent logins. Pushed GitHub branches are not deleted."}
           </DialogDescription>
           {error && (
             <p role="alert" className="text-xs text-destructive">
@@ -523,7 +523,11 @@ function ProjectWorkspace({
               disabled={pending}
               onClick={deleteThread}
             >
-              {pending ? "deleting sandbox…" : "delete thread and sandbox"}
+              {pending
+                ? "deleting workspace…"
+                : deleteTarget?.runtime === "user"
+                  ? "delete thread and workspace"
+                  : "delete thread and sandbox"}
             </Button>
           </DialogFooter>
         </DialogContent>

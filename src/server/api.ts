@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { isAPIError } from "better-auth/api";
@@ -21,6 +22,11 @@ import { repositoryCloneToken, repositoryWriteToken, github } from "./github";
 import { repositoryPath } from "@/lib/runtime";
 import type { AcpAction } from "@/lib/acp";
 import type { ThreadSandbox } from "./sandbox";
+
+function userSandboxName(userId: string) {
+  // Sandbox SDK names are limited to 63 characters, regardless of user ID length.
+  return `user-${createHash("sha256").update(userId).digest("hex").slice(0, 58)}`;
+}
 
 export const api = new Hono<{
   Bindings: Bindings;
@@ -163,6 +169,33 @@ api.get("/session", async (c) => {
     configured: true,
     user: { id: session.user.id, name: session.user.name },
   });
+});
+
+// Container-to-Worker credential checkpoint. This route deliberately precedes
+// browser authentication: a per-runtime capability, never a browser session,
+// authorizes it. Credential contents are never returned or logged.
+api.post("/codex-checkpoint/:id", bodyLimit({ maxSize: 65536 }), async (c) => {
+  if (!c.env.Sandboxes || !/^[a-f0-9]{64}$/.test(c.req.param("id")))
+    return c.notFound();
+  const token = c.req
+    .header("Authorization")
+    ?.match(/^Bearer ([a-f0-9-]{72})$/)?.[1];
+  if (!token || token.length !== 72)
+    return c.json({ error: "Unauthorized" }, 401);
+  const parsed = z
+    .strictObject({ credentials: z.string().max(32768).nullable() })
+    .safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "Invalid checkpoint" }, 400);
+  try {
+    const sandbox = c.env.Sandboxes.get(
+      c.env.Sandboxes.idFromString(c.req.param("id")),
+    );
+    if (!(await sandbox.saveCodexCredentials(token, parsed.data.credentials)))
+      return c.json({ error: "Unauthorized" }, 401);
+    return c.json({ saved: true });
+  } catch {
+    return c.json({ error: "Checkpoint unavailable" }, 503);
+  }
 });
 
 // All routes below require both a valid session and current operator admission.
@@ -312,6 +345,7 @@ api.post("/projects/:id/threads", async (c) => {
       ...input.data,
       id: crypto.randomUUID(),
       projectId: owned.id,
+      runtime: input.data.agent === "codex" ? "user" : "thread",
       createdAt: Date.now(),
     })
     .returning()
@@ -324,7 +358,7 @@ api.patch("/threads/:id", async (c) => {
   if (!input.success) return c.json({ error: "Invalid thread update." }, 400);
   const db = c.get("db");
   const owned = await db
-    .select({ id: thread.id, agent: thread.agent })
+    .select({ id: thread.id, agent: thread.agent, runtime: thread.runtime })
     .from(thread)
     .innerJoin(project, eq(thread.projectId, project.id))
     .where(
@@ -337,10 +371,14 @@ api.patch("/threads/:id", async (c) => {
   if (!owned) return c.notFound();
   if (c.env.Sandboxes && input.data.agent !== owned.agent) {
     const { getSandbox } = await import("@cloudflare/sandbox");
-    const state = await getSandbox<ThreadSandbox>(
+    const sandbox = getSandbox<ThreadSandbox>(
       c.env.Sandboxes,
-      owned.id,
-    ).workspaceStatus();
+      owned.runtime === "user" ? userSandboxName(c.get("user").id) : owned.id,
+    );
+    const state =
+      owned.runtime === "user"
+        ? await sandbox.userStatus(owned.id)
+        : await sandbox.workspaceStatus();
     if (state.started)
       return c.json(
         { error: "Create a new thread to use a different agent." },
@@ -352,6 +390,14 @@ api.patch("/threads/:id", async (c) => {
     .set({
       name: input.data.name,
       agent: input.data.agent,
+      ...(input.data.agent !== owned.agent
+        ? {
+            runtime:
+              input.data.agent === "codex"
+                ? ("user" as const)
+                : ("thread" as const),
+          }
+        : {}),
       version: sql`${thread.version} + 1`,
     })
     .where(and(eq(thread.id, owned.id), eq(thread.version, input.data.version)))
@@ -368,7 +414,7 @@ api.patch("/threads/:id", async (c) => {
 api.delete("/threads/:id", async (c) => {
   const db = c.get("db");
   const owned = await db
-    .select({ id: thread.id })
+    .select({ id: thread.id, runtime: thread.runtime })
     .from(thread)
     .innerJoin(project, eq(thread.projectId, project.id))
     .where(
@@ -386,8 +432,13 @@ api.delete("/threads/:id", async (c) => {
     );
   try {
     // UUIDs are already lowercase, matching getSandbox's named-object mapping.
-    const sandbox = c.env.Sandboxes.get(c.env.Sandboxes.idFromName(owned.id));
-    await sandbox.deleteWorkspace();
+    const sandbox = c.env.Sandboxes.get(
+      c.env.Sandboxes.idFromName(
+        owned.runtime === "user" ? userSandboxName(c.get("user").id) : owned.id,
+      ),
+    );
+    if (owned.runtime === "user") await sandbox.userDelete(owned.id);
+    else await sandbox.deleteWorkspace();
   } catch {
     return c.json(
       { error: "Sandbox cleanup failed. The thread was kept; retry deletion." },
@@ -429,7 +480,7 @@ const acpAction = z.discriminatedUnion("type", [
 api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
   const owned = await c
     .get("db")
-    .select({ id: thread.id, agent: thread.agent })
+    .select({ id: thread.id, agent: thread.agent, runtime: thread.runtime })
     .from(thread)
     .innerJoin(project, eq(thread.projectId, project.id))
     .where(
@@ -454,10 +505,17 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
       503,
     );
   const { getSandbox } = await import("@cloudflare/sandbox");
-  const sandbox = getSandbox<ThreadSandbox>(c.env.Sandboxes, owned.id);
+  const sandbox = getSandbox<ThreadSandbox>(
+    c.env.Sandboxes,
+    owned.runtime === "user" ? userSandboxName(c.get("user").id) : owned.id,
+  );
   try {
     return c.json(
-      action ? await sandbox.acpAction(action) : await sandbox.acpSnapshot(),
+      owned.runtime === "user"
+        ? await sandbox.userAcp(owned.id, action)
+        : action
+          ? await sandbox.acpAction(action)
+          : await sandbox.acpSnapshot(),
     );
   } catch (error) {
     console.error({
@@ -483,6 +541,9 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
       "The Codex bridge exited during startup. Check the container logs.",
       "Codex bridge did not become ready.",
       "Connect Codex first.",
+      "Stop all running Codex threads before signing out.",
+      "Codex sign-out is in progress.",
+      "Codex sign-out cleanup is pending.",
     ];
     const message =
       error instanceof Error && safeMessages.includes(error.message)
@@ -530,6 +591,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
     .select({
       id: thread.id,
       agent: thread.agent,
+      runtime: thread.runtime,
       repository: project.repository,
     })
     .from(thread)
@@ -556,8 +618,17 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
       503,
     );
   const { getSandbox } = await import("@cloudflare/sandbox");
-  const sandbox = getSandbox<ThreadSandbox>(c.env.Sandboxes, owned.id);
-  if (operation === "status") return c.json(await sandbox.workspaceStatus());
+  const shared = owned.runtime === "user";
+  const sandbox = getSandbox<ThreadSandbox>(
+    c.env.Sandboxes,
+    shared ? userSandboxName(c.get("user").id) : owned.id,
+  );
+  if (operation === "status")
+    return c.json(
+      shared
+        ? await sandbox.userStatus(owned.id)
+        : await sandbox.workspaceStatus(),
+    );
   if (operation === "publish") {
     const parsed = z
       .strictObject({
@@ -594,12 +665,11 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
       userToken.accessToken,
     );
     try {
+      const input = { ...parsed.data, branch: `agentflare/${owned.id}`, token };
       return c.json(
-        await sandbox.publishWorkspace({
-          ...parsed.data,
-          branch: `agentflare/${owned.id}`,
-          token,
-        }),
+        shared
+          ? await sandbox.userPublish(owned.id, input)
+          : await sandbox.publishWorkspace(input),
       );
     } catch (error) {
       const safe = [
@@ -650,14 +720,17 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
       token.accessToken,
     );
     try {
+      const input = {
+        repository: owned.repository,
+        agent: owned.agent,
+        name: c.get("user").name,
+        branch: `agentflare/${owned.id}`,
+        cloneToken,
+      };
       return c.json(
-        await sandbox.startWorkspace({
-          repository: owned.repository,
-          agent: owned.agent,
-          name: c.get("user").name,
-          branch: `agentflare/${owned.id}`,
-          cloneToken,
-        }),
+        shared
+          ? await sandbox.userStart(owned.id, input)
+          : await sandbox.startWorkspace(input),
       );
     } catch (error) {
       const stage =
@@ -677,6 +750,8 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
     }
   }
   if (operation === "terminal") {
+    if (shared)
+      return c.json({ error: "Shared Codex workspaces use ACP." }, 409);
     if (c.req.header("Upgrade")?.toLowerCase() !== "websocket")
       return c.json({ error: "WebSocket upgrade required." }, 426);
     const size = z.coerce.number().int().min(2).max(500);
@@ -696,13 +771,25 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
     });
   }
   try {
-    if (operation === "review") return c.json(await sandbox.reviewWorkspace());
+    if (operation === "review")
+      return c.json(
+        shared
+          ? await sandbox.userReview(owned.id)
+          : await sandbox.reviewWorkspace(),
+      );
     return c.json(
-      await sandbox.inspectWorkspace(
-        operation,
-        path,
-        c.req.query("staged") === "true",
-      ),
+      shared
+        ? await sandbox.userInspect(
+            owned.id,
+            operation,
+            path,
+            c.req.query("staged") === "true",
+          )
+        : await sandbox.inspectWorkspace(
+            operation,
+            path,
+            c.req.query("staged") === "true",
+          ),
     );
   } catch {
     return c.json(

@@ -4,6 +4,8 @@ import { shellArgument, type RuntimeState } from "@/lib/runtime";
 import type { AgentId } from "@/lib/workspace";
 import type { BranchReview, PublishInput, PublishResult } from "@/lib/runtime";
 import { publishSnapshot, type PublishState } from "./publish";
+import type { Bindings } from "./env";
+import { UserRuntime, type UserStart } from "./user-runtime";
 
 type StartInput = {
   repository: string;
@@ -13,7 +15,40 @@ type StartInput = {
   cloneToken: string;
 };
 
-export class ThreadSandbox extends Sandbox {
+export class ThreadSandbox extends Sandbox<Bindings> {
+  private shared = new UserRuntime(
+    this,
+    this.ctx.storage,
+    this.env,
+    this.ctx.id.toString(),
+  );
+  userStatus(id: string) {
+    return this.shared.status(id);
+  }
+  userStart(id: string, input: UserStart) {
+    return this.shared.start(id, input);
+  }
+  userDelete(id: string) {
+    return this.shared.delete(id);
+  }
+  userInspect(id: string, operation: string, path = "", staged = false) {
+    return this.shared.inspect(id, operation, path, staged);
+  }
+  userReview(id: string) {
+    return this.shared.review(id);
+  }
+  userPublish(
+    id: string,
+    input: PublishInput & { branch: string; token: string },
+  ) {
+    return this.shared.publish(id, input);
+  }
+  userAcp(id: string, action?: AcpAction) {
+    return this.shared.acp(id, action);
+  }
+  saveCodexCredentials(token: string, value: string | null) {
+    return this.shared.persist(token, value);
+  }
   private starting?: Promise<RuntimeState>;
   private startingAcp?: Promise<AcpSnapshot>;
   private publishing?: Promise<PublishResult>;

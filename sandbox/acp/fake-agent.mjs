@@ -1,19 +1,21 @@
 // Scripted protocol peer for bridge regression tests. No provider access.
 import { createInterface } from "node:readline";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync, rmSync } from "node:fs";
 const send = (message) =>
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const reply = (id, result) => send({ id, result });
 const error = (id, code) =>
   send({ id, error: { code, message: "synthetic error" } });
-const update = (update) =>
+const update = (update, sessionId = "saved-session") =>
   send({
     method: "session/update",
-    params: { sessionId: "saved-session", update },
+    params: { sessionId, update },
   });
 let login;
 let turn;
+const turns = new Map();
 const broken = process.argv.includes("broken");
+const shared = process.argv.includes("shared");
 const initialConfig = [
   {
     type: "select",
@@ -53,19 +55,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     });
   } else if (m.method === "session/new" || m.method === "session/load") {
     if (!existsSync("authenticated")) return error(m.id, -32000);
+    const sessionId = m.method === "session/load" ? m.params.sessionId
+      : shared ? `session-${m.params.cwd.split("/").at(-2)}` : "saved-session";
     if (m.method === "session/load") {
       if (broken) return error(m.id, -32002);
       update({
         sessionUpdate: "user_message_chunk",
         content: { type: "text", text: "previous task" },
-      });
+      }, sessionId);
       update({
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "restored answer" },
-      });
+      }, sessionId);
     }
     reply(m.id, {
-      sessionId: "saved-session",
+      sessionId,
       configOptions: initialConfig,
       modes: {
         currentModeId: "workspace-write",
@@ -97,6 +101,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       reply(login, {});
     }, 100);
   } else if (m.method === "session/prompt") {
+    const sessionId = m.params.sessionId;
     if (m.params.prompt[0].text === "crash") return process.exit(1);
     if (m.params.prompt[0].text === "long") {
       for (let i = 0; i < 4; i++) {
@@ -132,19 +137,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       return reply(m.id, { stopReason: "end_turn" });
     }
     turn = m.id;
+    turns.set(sessionId, m.id);
     update({
       sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "Inspecting " },
-    });
+      content: { type: "text", text: `Inspecting ${shared ? sessionId : ""}` },
+    }, sessionId);
     update({
       sessionUpdate: "agent_message_chunk",
       content: { type: "text", text: "files." },
-    });
+    }, sessionId);
+    const permissionId = shared ? `permission-${sessionId}` : "permission";
     send({
-      id: "permission",
+      id: permissionId,
       method: "session/request_permission",
       params: {
-        sessionId: "saved-session",
+        sessionId,
         toolCall: { toolCallId: "tool-1", title: "Run tests?" },
         options: [
           { optionId: "deny", name: "Deny", kind: "reject_once" },
@@ -168,7 +175,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         },
       ],
     }), 50);
-  } else if (m.id === "permission" && turn) {
+  } else if ((m.id === "permission" || (typeof m.id === "string" && m.id.startsWith("permission-session-"))) && (turn || shared)) {
+    const sessionId = shared ? m.id.slice("permission-".length) : "saved-session";
+    const activeTurn = shared ? turns.get(sessionId) : turn;
+    if (!activeTurn) return;
     const outcome = m.result.outcome;
     update({
       sessionUpdate: "agent_message_chunk",
@@ -176,11 +186,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         type: "text",
         text: outcome.optionId === "allow" ? " Approved." : " Denied.",
       },
-    });
-    reply(turn, { stopReason: "end_turn" });
+    }, sessionId);
+    reply(activeTurn, { stopReason: "end_turn" });
+    turns.delete(sessionId);
     turn = null;
-  } else if (m.method === "session/cancel" && turn) {
-    reply(turn, { stopReason: "cancelled" });
-    turn = null;
-  } else if (m.method === "logout") reply(m.id, {});
+  } else if (m.method === "session/cancel") {
+    const pending = shared ? turns.get(m.params.sessionId) : turn;
+    if (pending) reply(pending, { stopReason: "cancelled" });
+    turns.delete(m.params.sessionId);
+    if (!shared) turn = null;
+  } else if (m.method === "logout") {
+    rmSync("authenticated", { force: true });
+    reply(m.id, {});
+  }
 });

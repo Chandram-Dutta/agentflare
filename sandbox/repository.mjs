@@ -212,7 +212,7 @@ if (
   process.stdout.write(
     JSON.stringify(
       inspectRepository(
-        "/workspace/repo",
+        process.argv[3] ?? "/workspace/repo",
         JSON.parse(Buffer.from(process.argv[2], "base64").toString()),
       ),
     ),

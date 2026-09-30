@@ -173,10 +173,20 @@ export function AcpConversation({
             variant="ghost"
             size="icon-xs"
             aria-label="Sign out of Codex"
-            title="Sign out of Codex"
+            title={
+              snapshot?.authScope === "user"
+                ? "Sign out of Codex in all shared threads"
+                : "Sign out of Codex"
+            }
             disabled={actionPending}
             onClick={() => {
-              if (window.confirm("Sign out of native Codex in this sandbox?"))
+              if (
+                window.confirm(
+                  snapshot?.authScope === "user"
+                    ? "Sign out of Codex across all your shared threads? Stop running tasks first. Your workspaces and conversations will remain."
+                    : "Sign out of native Codex in this sandbox?",
+                )
+              )
                 void action({ type: "logout" });
             }}
           >
@@ -196,6 +206,12 @@ export function AcpConversation({
 
       <div ref={transcript} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-5">
+          {snapshot?.authPersistence === "pending" && (
+            <p role="status" className="text-primary">
+              Codex login backup is pending. Keep this workspace running until
+              it is saved.
+            </p>
+          )}
           {snapshot?.truncated && (
             <p className="text-muted-foreground">
               Showing recent output. Long messages may be shortened.
@@ -216,7 +232,9 @@ export function AcpConversation({
           {snapshot?.status === "auth-required" && (
             <div className="border p-3">
               <p className="mb-3 text-muted-foreground">
-                Sign in to native Codex for this sandbox.
+                {snapshot.authScope === "user"
+                  ? "Sign in once to use Codex across your shared threads."
+                  : "Sign in to native Codex for this legacy sandbox."}
               </p>
               <Button
                 variant="outline"
@@ -227,8 +245,9 @@ export function AcpConversation({
                 Sign in with ChatGPT
               </Button>
               <p className="mt-3 text-[11px] leading-4 text-muted-foreground">
-                Sign-in survives browser reloads, but replacing the sandbox can
-                require signing in again.
+                {snapshot.authScope === "user"
+                  ? "Your login is encrypted and saved for this account. New threads reuse it. OpenAI may still require reauthorization if access expires or is revoked."
+                  : "This older thread keeps its own login. New Codex threads share one account login; this thread's files are not moved."}
               </p>
             </div>
           )}

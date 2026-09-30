@@ -6,6 +6,8 @@ export type AcpMessage = {
 };
 
 export type AcpSnapshot = {
+  authScope?: "user";
+  authPersistence?: "saved" | "pending";
   status:
     | "disconnected"
     | "connecting"

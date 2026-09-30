@@ -74,6 +74,12 @@ beforeAll(async () => {
       .filter((s) => s.trim())
       .map((s) => DB.prepare(s)),
   );
+  await DB.prepare(
+    await readFile(
+      new URL("../../migrations/0001_strong_scalphunter.sql", import.meta.url),
+      "utf8",
+    ),
+  ).run();
 }, 20000);
 
 beforeEach(async () => {
@@ -262,12 +268,16 @@ test("thread deletion checks ownership/origin and waits for sandbox cleanup befo
   });
   env.Sandboxes = {
     idFromName(id: string) {
-      expect(id).toBe(created.id);
+      expect(id).toBe(
+        "user-2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db18",
+      );
+      expect(id.length).toBe(63);
       return id;
     },
     get() {
       return {
-        async deleteWorkspace() {
+        async userDelete(id: string) {
+          expect(id).toBe(created.id);
           calls++;
           if (fail) throw new Error("cleanup failed");
           entered();
@@ -330,6 +340,72 @@ async function createThread(
   return response.json();
 }
 
+test("new Codex threads share a user runtime while existing metadata defaults to legacy", async () => {
+  const project = await createProject();
+  const created = await createThread(project.id);
+  expect(created.runtime).toBe("user");
+  await env.DB.prepare(
+    "INSERT INTO thread (id, project_id, name, agent, version, created_at) VALUES (?, ?, 'legacy', 'codex', 1, 1)",
+  )
+    .bind("old-thread", project.id)
+    .run();
+  const data = (await (await request("/workspace")).json()) as WorkspaceData;
+  expect(data.threads.find((t) => t.id === "old-thread")?.runtime).toBe(
+    "thread",
+  );
+  expect(
+    (
+      await request(`/projects/${project.id}/threads`, "POST", {
+        name: "injected",
+        agent: "codex",
+        runtime: "thread",
+      })
+    ).status,
+  ).toBe(400);
+});
+
+test("checkpoint endpoint requires its capability rather than a browser login and returns no credentials", async () => {
+  const id = "a".repeat(64);
+  const token = "b".repeat(72);
+  let calls = 0;
+  env.Sandboxes = {
+    idFromString: (value: string) => {
+      expect(value).toBe(id);
+      return value;
+    },
+    get: () => ({
+      saveCodexCredentials: async (value: string, credentials: string) => {
+        calls++;
+        expect(credentials).toBe('{"tokens":{}}');
+        return value === token;
+      },
+    }),
+  } as unknown as NonNullable<Bindings["Sandboxes"]>;
+  const send = (authorization?: string) =>
+    api.request(
+      `${origin}/api/codex-checkpoint/${id}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authorization ? { Authorization: authorization } : {}),
+        },
+        body: JSON.stringify({ credentials: '{"tokens":{}}' }),
+      },
+      env,
+    );
+  try {
+    expect((await send()).status).toBe(401);
+    expect(calls).toBe(0);
+    expect((await send(`Bearer ${"c".repeat(72)}`)).status).toBe(401);
+    const response = await send(`Bearer ${token}`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ saved: true });
+  } finally {
+    delete env.Sandboxes;
+  }
+});
+
 describe("D1-backed workspace authorization", () => {
   test("persists normalized projects and thread edits across fresh requests; lists only the owner's data", async () => {
     const alice = await createProject();
@@ -352,7 +428,13 @@ describe("D1-backed workspace authorization", () => {
       { ...alice, repository: "https://github.com/acme/widget" },
     ]);
     expect(state.threads).toEqual([
-      { ...thread, name: "permissions fixed", agent: "claude", version: 2 },
+      {
+        ...thread,
+        name: "permissions fixed",
+        agent: "claude",
+        runtime: "thread",
+        version: 2,
+      },
     ]);
   });
 

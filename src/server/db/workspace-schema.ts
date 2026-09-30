@@ -26,6 +26,10 @@ export const thread = sqliteTable(
       .references(() => project.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     agent: text("agent").$type<AgentId>().notNull(),
+    runtime: text("runtime")
+      .$type<"thread" | "user">()
+      .notNull()
+      .default("thread"),
     version: integer("version").notNull().default(1),
     createdAt: integer("created_at").notNull(),
   },

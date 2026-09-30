@@ -15,8 +15,10 @@ A persistent, authenticated workspace with an initial Cloudflare Sandbox runtime
 - Monospace light/dark workspace; existing Claude threads retain their legacy terminal.
 - Server-side ownership checks, exact-origin write protection and stale-edit detection.
 
-Each started thread checks user and GitHub App repository access, clones into its
-own sandbox/branch. New threads default to Codex through the pinned ACP adapter.
+Each started thread checks user and GitHub App repository access and gets its own
+checkout/branch. New Codex threads share one sandbox and one ACP process per user.
+Threads are separate working directories, not security boundaries; an agent can
+access that same user's other checkouts. Different users have separate sandboxes.
 The sandbox bridge owns the conversation and pending approvals, so browser reloads
 do not restart a turn. The UI polls snapshots once per second; this is not yet a
 push-streaming transport. Files and Git use Pierre Trees/Diffs with actual
@@ -42,13 +44,14 @@ duplicating an already-published commit/PR. The initial limits are 10,000 tree e
 and 4 MiB of changed blob content relative to the starting base. Workflow permission
 restrictions and repository branch rules can still reject publication.
 
-Use the trash button beside a thread to delete it and destroy its sandbox,
-including uncommitted files and saved agent logins. Confirmation is required.
+Use the trash button beside a thread to delete its checkout and uncommitted files.
+For shared Codex threads this keeps the user's login and other threads. Legacy
+threads still destroy their individual sandbox and login. Confirmation is required.
 Cleanup must succeed before thread metadata is removed; failed cleanup can be
 retried. Pushed GitHub branches are not deleted.
 
-**Experimental: sandbox disk and agent login state are ephemeral.** After 30 minutes
-idle or a container restart they can be lost; saved thread metadata is not a backup.
+**Experimental: workspace disk is ephemeral.** After 30 minutes idle or a container
+restart files can be lost; saved thread metadata is not a workspace backup.
 No R2 checkpoints yet. Clone credentials are short-lived and read-only, not left
 in Git configuration. The publishing UI does not grant native `git push` access
 to the agent. Do not entrust unpublished work to this initial runtime.
@@ -61,13 +64,33 @@ settings if OpenAI requires it. This uses Codex's native subscription login, not
 Agentflare's own subscription-sharing OAuth registration. No OpenAI client secret
 or API key is needed by the operator.
 
-Credentials remain in that sandbox's Codex home and never go to the browser.
-They survive browser reloads, but **not guaranteed container replacement**. Log
-in separately per sandbox; Agentflare does not copy rotating refresh tokens
-between threads. Reconnecting a surviving sandbox reloads the saved ACP session;
+New Codex threads use one native login per user, shared across projects and threads.
+Only one Codex app-server owns refresh tokens; tokens are not copied between active
+agent processes. The bridge checkpoints the native auth file on changes (checked
+every second, including while browsers are closed) through a private per-runtime
+capability. The Worker encrypts it with AES-GCM and stores it in that user's Durable
+Object. The key derives from `BETTER_AUTH_SECRET` with a separate key domain, and
+the ciphertext is bound to the runtime identity. Never rotate that secret without
+planning for users to sign in again. Credentials never go to the browser.
+
+A replacement container restores the login; a surviving auth file takes precedence
+over the backup to avoid rolling back a newer token rotation. A crash before a
+rotation is checkpointed, provider revocation, or expired authorization can still
+require reauthorization. The UI reports pending backups; this is not a guarantee
+of perpetual authentication. No additional operator OpenAI key is required.
+
+Existing threads retain their original `runtime=thread` sandbox and login. They
+are not moved or destroyed by the migration. Create a new Codex thread and sign in
+once to begin using the shared runtime. Apply the additive D1 migration before
+deploying this code and rebuild the container image; reusing the old image is not
+supported for this release. Workspace/conversation recovery remains separate work.
+
+Reconnecting a surviving sandbox reloads the saved ACP session;
 a failed load is reported rather than silently starting a new conversation.
 Approvals require an explicit choice; Stop cancels the current turn. Signing out
-of Codex does not delete the conversation. This is separate from GitHub sign-out.
+of shared Codex applies to all the user's shared threads and is blocked while any
+thread is busy. It does not delete workspaces or conversations. This is separate
+from GitHub sign-out. Deleting the last thread does not clear the saved login.
 
 Mode, model, reasoning effort and fast-mode selectors appear only when advertised
 by the adapter. They cannot change during a running turn. Model changes refresh
@@ -240,7 +263,7 @@ input using the image's Bun and agent launcher. The launcher acquires a controll
 terminal so the SDK's pre-created PTY delivers SIGWINCH to the CLI. This is a
 local process-level regression check, not a live Cloudflare or agent UI test.
 
-Still needed: R2 checkpoints and restore, encrypted reusable agent credentials,
+Still needed: R2 workspace checkpoints and restore,
 agent restart/stop UX, and per-user runtime budgets.
 
 **Publishing must be enforced at the credential boundary.** A confirmation button

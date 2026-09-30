@@ -1,9 +1,9 @@
 import { test, expect } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createBridge } from "./bridge.mjs";
+import { createBridge, createUserBridge } from "./bridge.mjs";
 
 const fake = fileURLToPath(new URL("./fake-agent.mjs", import.meta.url));
 async function until(condition) {
@@ -187,3 +187,82 @@ test("config updates replace the list and thought chunks stay separate from answ
     await until(() => b.snapshot.status === "ready");
     expect(b.snapshot.configOptions.map((option) => option.id)).toEqual(["collaboration_mode"]);
   }));
+
+const threadA = "11111111-1111-4111-8111-111111111111";
+const threadB = "22222222-2222-4222-8222-222222222222";
+async function sharedFixture(authenticated, run) {
+  const root = await mkdtemp(join(tmpdir(), "acp-shared-"));
+  for (const id of [threadA, threadB]) await mkdir(join(root, id, "repo"), { recursive: true });
+  if (authenticated) await writeFile(join(root, "authenticated"), "synthetic");
+  const bridge = createUserBridge({ command: [process.execPath, fake, "shared"], root });
+  try { await run(bridge, root); } finally { await bridge.close(); await rm(root, { recursive: true, force: true }); }
+}
+
+test("shared bridge isolates routing and deletion", async () => {
+  await sharedFixture(true, async (bridge) => {
+    const a = await bridge.session(threadA);
+    const b = await bridge.session(threadB);
+    await Promise.all([a.ready, b.ready]);
+    await a.act({ type: "prompt", text: "inspect", requestId: "same-id" });
+    await b.act({ type: "prompt", text: "inspect", requestId: "same-id" });
+    await until(() => a.snapshot.permissions.length === 1 && b.snapshot.permissions.length === 1);
+    expect(a.snapshot.messages.at(-1).text).toContain(threadA);
+    expect(b.snapshot.messages.at(-1).text).toContain(threadB);
+    await expect(a.act({ type: "permission", id: b.snapshot.permissions[0].id, optionId: "deny" })).rejects.toThrow();
+    await a.act({ type: "permission", id: a.snapshot.permissions[0].id, optionId: "deny" });
+    await b.act({ type: "permission", id: b.snapshot.permissions[0].id, optionId: "allow" });
+    await until(() => a.snapshot.status === "ready" && b.snapshot.status === "ready");
+    await bridge.deleteSession(threadA);
+    await b.act({ type: "prompt", text: "inspect", requestId: "still-alive" });
+    await until(() => b.snapshot.permissions.length === 1);
+    expect(b.snapshot.status).toBe("running");
+  });
+});
+
+test("authentication is global and logout checks every session", async () => {
+  await sharedFixture(false, async (bridge) => {
+    const a = await bridge.session(threadA);
+    const b = await bridge.session(threadB);
+    await Promise.all([a.ready, b.ready]);
+    await a.act({ type: "authenticate" });
+    await until(() => a.snapshot.login && b.snapshot.login);
+    await b.act({ type: "login-response", id: "device", action: "accept" });
+    await until(() => a.snapshot.status === "ready" && b.snapshot.status === "ready");
+    await a.act({ type: "prompt", text: "inspect", requestId: "busy" });
+    await until(() => a.snapshot.permissions.length === 1);
+    await expect(b.act({ type: "logout" })).rejects.toThrow("busy");
+    await a.act({ type: "permission", id: a.snapshot.permissions[0].id, optionId: "deny" });
+    await until(() => a.snapshot.status === "ready");
+    await b.act({ type: "logout" });
+    expect([a.snapshot.status, b.snapshot.status]).toEqual(["auth-required", "auth-required"]);
+  });
+});
+
+test("shared replay is routed before load returns and process death errors every session", async () => {
+  await sharedFixture(true, async (bridge, root) => {
+    await writeFile(join(root, threadA, "acp-session"), `session-${threadA}`);
+    await writeFile(join(root, threadB, "acp-session"), `session-${threadB}`);
+    const a = await bridge.session(threadA);
+    const b = await bridge.session(threadB);
+    await Promise.all([a.ready, b.ready]);
+    for (const session of [a,b]) expect(session.snapshot.messages.map(m => m.text)).toEqual(["previous task", "restored answer"]);
+    await a.act({ type:"prompt",text:"crash",requestId:"fatal" });
+    await until(() => a.snapshot.status === "error" && b.snapshot.status === "error");
+    await expect(b.act({type:"prompt",text:"inspect",requestId:"after-death"})).rejects.toThrow();
+  });
+});
+
+test("deleting a running shared session settles its turn without stopping its sibling", async () => {
+  await sharedFixture(true, async bridge => {
+    const a = await bridge.session(threadA);
+    const b = await bridge.session(threadB);
+    await Promise.all([a.ready,b.ready]);
+    await a.act({type:"prompt",text:"inspect",requestId:"delete-running"});
+    await until(() => a.snapshot.permissions.length === 1);
+    await bridge.deleteSession(threadA);
+    await expect(bridge.session(threadA)).rejects.toThrow();
+    expect(b.snapshot.status).toBe("ready");
+    await b.act({type:"set-config",configId:"model",value:"large"});
+    expect(b.snapshot.configOptions[0].currentValue).toBe("large");
+  });
+});
