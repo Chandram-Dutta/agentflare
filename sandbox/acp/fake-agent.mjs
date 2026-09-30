@@ -22,7 +22,9 @@ let turn;
 const turns = new Map();
 const broken = process.argv.includes("broken");
 const shared = process.argv.includes("shared");
+const nativeMode = process.argv.includes("native-mode");
 const initialConfig = [
+  ...(nativeMode ? [{ type: "select", id: "mode", name: "Mode", currentValue: "workspace-write", options: [{ value: "workspace-write", name: "Workspace write" }, { value: "read-only", name: "Read only" }] }] : []),
   {
     type: "select",
     id: "model",
@@ -178,6 +180,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       },
     });
   } else if (m.method === "session/set_config_option") {
+    if (nativeMode && m.params.configId === "mode") {
+      return reply(m.id, { configOptions: initialConfig.map(o => o.id === "mode" ? { ...o, currentValue: m.params.value } : o) });
+    }
     if (process.argv.includes("crash-config")) return process.exit(1);
     if (m.params.configId !== "model" || m.params.value !== "large")
       return error(m.id, -32002);

@@ -108,7 +108,7 @@ export function createBridge({
       snapshot.truncated = true;
     }
   }
-  function normalizeConfigOptions(configOptions, modes) {
+  function normalizeConfigOptions(configOptions) {
     const source = Array.isArray(configOptions) ? configOptions : [];
     const normalized = source.flatMap((option) => {
       if (
@@ -148,22 +148,7 @@ export function createBridge({
         options,
       }];
     });
-    if (normalized.some((option) => option.id === "mode") || !modes)
-      return normalized;
-    if (
-      typeof modes.currentModeId !== "string" ||
-      !Array.isArray(modes.availableModes)
-    )
-      return normalized;
-    const options = modes.availableModes.flatMap((mode) =>
-      typeof mode?.id === "string" && typeof mode.name === "string"
-        ? [{ value: mode.id, name: mode.name,
-            ...(typeof mode.description === "string" ? { description: mode.description } : {}) }]
-        : [],
-    );
-    return options.some((choice) => choice.value === modes.currentModeId)
-      ? [{ id: "mode", name: "Mode", category: "mode", currentValue: modes.currentModeId, options }, ...normalized]
-      : normalized;
+    return normalized;
   }
   function update({ update: u }) {
     if (
@@ -206,10 +191,6 @@ export function createBridge({
         (option) => option.id === "model" || option.category === "model",
       )?.currentValue;
       if (previousModel !== nextModel) delete snapshot.contextUsage;
-    } else if (u.sessionUpdate === "current_mode_update") {
-      const mode = snapshot.configOptions.find((option) => option.id === "mode");
-      if (mode?.options.some((choice) => choice.value === u.currentModeId))
-        mode.currentValue = u.currentModeId;
     } else if (u.sessionUpdate === "usage_update") {
       if (
         Number.isFinite(u.used) && u.used >= 0 &&
@@ -346,14 +327,14 @@ export function createBridge({
         mcpServers: [],
       });
       sessionId = saved;
-      snapshot.configOptions = normalizeConfigOptions(result.configOptions, result.modes);
+      snapshot.configOptions = normalizeConfigOptions(result.configOptions);
     } else {
       const result = await agent.request(methods.agent.session.new, {
         cwd,
         mcpServers: [],
       });
       sessionId = result.sessionId;
-      snapshot.configOptions = normalizeConfigOptions(result.configOptions, result.modes);
+      snapshot.configOptions = normalizeConfigOptions(result.configOptions);
       await mkdir(dirname(sessionFile), { recursive: true, mode: 0o700 });
       await writeFile(`${sessionFile}.tmp`, sessionId, { mode: 0o600 });
       await rename(`${sessionFile}.tmp`, sessionFile);
@@ -539,7 +520,7 @@ export function createUserBridge({
   });
   child.stderr.resume();
 
-  const normalize = (options = [], modes) => {
+  const normalize = (options = []) => {
     const result = (Array.isArray(options) ? options : []).flatMap((o) => {
       if (o?.type !== "select" || typeof o.id !== "string" || typeof o.name !== "string" ||
           typeof o.currentValue !== "string" || !Array.isArray(o.options)) return [];
@@ -552,12 +533,6 @@ export function createUserBridge({
         ...(typeof o.category === "string" ? { category: o.category } : {}),
         ...(typeof o.description === "string" ? { description: o.description } : {}) }];
     });
-    if (!result.some((o) => o.id === "mode") && modes?.availableModes) {
-      const choices = modes.availableModes.flatMap((x) => typeof x?.id === "string" && typeof x.name === "string"
-        ? [{ value: x.id, name: x.name }] : []);
-      if (choices.some((x) => x.value === modes.currentModeId))
-        result.unshift({ id: "mode", name: "Mode", category: "mode", currentValue: modes.currentModeId, options: choices });
-    }
     return result;
   };
   const bound = (s) => {
@@ -613,9 +588,6 @@ export function createUserBridge({
       const before = s.configOptions.find(o => o.id === "model" || o.category === "model")?.currentValue;
       s.configOptions = normalize(u.configOptions);
       if (before !== s.configOptions.find(o => o.id === "model" || o.category === "model")?.currentValue) delete s.contextUsage;
-    } else if (u.sessionUpdate === "current_mode_update") {
-      const mode = s.configOptions.find(o => o.id === "mode");
-      if (mode?.options.some(o => o.value === u.currentModeId)) mode.currentValue = u.currentModeId;
     }
     else if (u.sessionUpdate === "usage_update" && Number.isFinite(u.used) && u.used >= 0 && Number.isFinite(u.size) && u.size > 0)
       s.contextUsage = { used: u.used, size: u.size };
@@ -699,7 +671,7 @@ export function createUserBridge({
       await writeFile(`${c.sessionFile}.tmp`, c.sessionId, { mode: 0o600 });
       await rename(`${c.sessionFile}.tmp`, c.sessionFile);
     }
-    c.snapshot.configOptions = normalize(result.configOptions, result.modes);
+    c.snapshot.configOptions = normalize(result.configOptions);
     c.snapshot.promptCapabilities = initialized.agentCapabilities?.promptCapabilities ?? {};
     if (dead || c.deleted) throw Error("Disconnected");
     c.snapshot.status = "ready";
