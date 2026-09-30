@@ -438,11 +438,18 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
           cloneToken,
         }),
       );
-    } catch {
+    } catch (error) {
+      const stage =
+        error instanceof Error
+          ? error.message.match(
+              /Workspace startup failed during (checking workspace|checking existing sandbox files|starting container|checking out repository|creating agent session|saving workspace state)\./,
+            )?.[1]
+          : undefined;
       return c.json(
         {
-          error:
-            "Sandbox could not start. Check container availability and repository access. If this thread lost its sandbox or has a partial checkout, create a new thread.",
+          error: stage
+            ? `Sandbox could not start: failed while ${stage}. Check the installation's runtime logs.`
+            : "Sandbox startup was interrupted before completion. Check the installation's runtime logs.",
         },
         502,
       );
