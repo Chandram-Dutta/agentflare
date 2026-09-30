@@ -3,23 +3,38 @@
 import { ArrowUpRight, ChevronRight, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import Link from "next/link";
+import { useState } from "react";
 import { Button } from "./ui/button";
+import { apiRequest } from "@/lib/api-client";
 
 const github = "https://github.com/Chandram-Dutta/agentflare";
 
 export function LandingPage({
   configured,
-  pending,
-  error,
-  onSignIn,
+  initialError = "",
 }: {
-  configured?: boolean;
-  pending: boolean;
-  error: string;
-  onSignIn: () => void;
+  configured: boolean;
+  initialError?: string;
 }) {
   const { resolvedTheme, setTheme } = useTheme();
-  const disabled = configured !== true || pending;
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(initialError);
+  const disabled = !configured || pending;
+  async function onSignIn() {
+    setPending(true);
+    setError("");
+    try {
+      const { url } = await apiRequest<{ url: string }>(
+        "/auth/sign-in/social",
+        "POST",
+        {},
+      );
+      window.location.assign(url);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Sign-in failed.");
+      setPending(false);
+    }
+  }
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-[920px] flex-col px-6 leading-[1.7] sm:px-10">
       <a
@@ -117,11 +132,6 @@ export function LandingPage({
           {pending && (
             <p role="status" className="mt-3 text-xs text-muted-foreground">
               Connecting to GitHub…
-            </p>
-          )}
-          {configured === undefined && !error && (
-            <p role="status" className="mt-3 text-xs text-muted-foreground">
-              Checking installation…
             </p>
           )}
           {configured === false && (

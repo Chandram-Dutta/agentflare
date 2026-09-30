@@ -14,12 +14,13 @@ import {
   threadUpdate,
   workspaceConfig,
 } from "@/lib/workspace";
-import { createAuth } from "./auth";
-import { allowedGitHubIds, installationReady, type Bindings } from "./env";
+import { createAuth, getViewer } from "./auth";
+import { installationReady, type Bindings } from "./env";
 import { account } from "./db/auth-schema";
 import { project, thread } from "./db/workspace-schema";
 import { repositoryCloneToken, repositoryWriteToken, github } from "./github";
 import { repositoryPath } from "@/lib/runtime";
+import { promptActionSchema } from "@/lib/acp-content";
 import type { AcpAction } from "@/lib/acp";
 import type { ThreadSandbox } from "./sandbox";
 
@@ -132,7 +133,7 @@ api.on(["GET", "POST"], "/auth/*", bodyLimit({ maxSize: 8192 }), async (c) => {
         headers,
         body: JSON.stringify({
           provider: "github",
-          callbackURL: `${c.env.BETTER_AUTH_URL}/`,
+          callbackURL: `${c.env.BETTER_AUTH_URL}/workspace`,
           errorCallbackURL: `${c.env.BETTER_AUTH_URL}/?auth=failed`,
           disableRedirect: true,
         }),
@@ -143,31 +144,15 @@ api.on(["GET", "POST"], "/auth/*", bodyLimit({ maxSize: 8192 }), async (c) => {
 });
 
 api.get("/session", async (c) => {
-  if (!installationReady(c.env))
-    return c.json({ configured: false, user: null });
-  const session = await createAuth(c.env).api.getSession({
-    headers: c.req.raw.headers,
-  });
-  if (!session) return c.json({ configured: true, user: null });
-  const db = drizzle(c.env.DB!);
-  const identity = await db
-    .select({ id: account.accountId })
-    .from(account)
-    .where(
-      and(
-        eq(account.userId, session.user.id),
-        eq(account.providerId, "github"),
-      ),
-    )
-    .get();
-  if (!identity || !allowedGitHubIds(c.env).has(identity.id))
+  const session = await getViewer(c.env, c.req.raw.headers);
+  if (session.denied)
     return c.json(
       { error: "This account is no longer allowed on this installation." },
       403,
     );
   return c.json({
-    configured: true,
-    user: { id: session.user.id, name: session.user.name },
+    configured: session.configured,
+    user: session.user,
   });
 });
 
@@ -204,7 +189,7 @@ api.use(
   (c, next) =>
     bodyLimit({
       maxSize: /^\/api\/threads\/[^/]+\/runtime\/acp$/.test(c.req.path)
-        ? 100000
+        ? 2_100_000
         : 4096,
     })(c, next),
   async (c, next) => {
@@ -216,28 +201,15 @@ api.use(
     ) {
       return c.json({ error: "Origin is not allowed." }, 403);
     }
-    const session = await createAuth(c.env).api.getSession({
-      headers: c.req.raw.headers,
-    });
-    if (!session) return c.json({ error: "Sign in to continue." }, 401);
-    const db = drizzle(c.env.DB!);
-    const identity = await db
-      .select({ id: account.accountId })
-      .from(account)
-      .where(
-        and(
-          eq(account.userId, session.user.id),
-          eq(account.providerId, "github"),
-        ),
-      )
-      .get();
-    if (!identity || !allowedGitHubIds(c.env).has(identity.id))
+    const session = await getViewer(c.env, c.req.raw.headers);
+    if (session.denied)
       return c.json(
         { error: "This account is not allowed on this installation." },
         403,
       );
-    c.set("user", { id: session.user.id, name: session.user.name });
-    c.set("db", db);
+    if (!session.user) return c.json({ error: "Sign in to continue." }, 401);
+    c.set("user", session.user);
+    c.set("db", drizzle(c.env.DB!));
     await next();
   },
 );
@@ -485,11 +457,7 @@ const acpAction = z.discriminatedUnion("type", [
     configId: z.string().min(1).max(128),
     value: z.string().max(256),
   }),
-  z.strictObject({
-    type: z.literal("prompt"),
-    text: z.string().trim().min(1).max(16000),
-    requestId: z.string().min(1).max(128),
-  }),
+  promptActionSchema,
   z.strictObject({ type: z.literal("cancel") }),
   z.strictObject({
     type: z.literal("permission"),

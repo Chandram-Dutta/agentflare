@@ -1,6 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { useTheme } from "next-themes";
 import { Panel, Separator } from "react-resizable-panels";
 import { RefreshCw, Files, FileDiff, GitBranch } from "lucide-react";
@@ -15,16 +23,25 @@ import { apiRequest } from "@/lib/api-client";
 import type { BranchReview, GitChange } from "@/lib/runtime";
 import { useThreadStore, useThreadState } from "./thread-state";
 import type { RepositoryState } from "@/lib/thread-state";
+import type { RepositoryFileLink } from "@/lib/repository-links";
+
+type RepositoryInspectorHandle = {
+  openFile: (file: RepositoryFileLink) => void;
+};
+
+type RepositoryView = NonNullable<RepositoryState["view"]>;
 
 export function RuntimeWorkspace({
   threadId,
   projectId,
   hiddenPanes,
+  onShowViewer,
   children,
 }: {
   threadId?: string;
   projectId: string;
   hiddenPanes: string[];
+  onShowViewer: () => void;
   children: (started: boolean) => ReactNode;
 }) {
   const store = useThreadStore();
@@ -32,6 +49,7 @@ export function RuntimeWorkspace({
   const [agentControls, setAgentControls] = useState<HTMLDivElement | null>(
     null,
   );
+  const inspectorRef = useRef<RepositoryInspectorHandle>(null);
   const base = `/threads/${threadId}/runtime`;
   const conversationVisible = !hiddenPanes.includes("terminal");
   useEffect(() => {
@@ -76,6 +94,10 @@ export function RuntimeWorkspace({
                 key={threadId}
                 threadId={threadId}
                 headerTarget={agentControls}
+                onOpenFile={(file) => {
+                  inspectorRef.current?.openFile(file);
+                  onShowViewer();
+                }}
               />
             ) : (
               <TerminalPreview threadId={threadId} />
@@ -129,6 +151,7 @@ export function RuntimeWorkspace({
         projectId={projectId}
         hiddenPanes={hiddenPanes}
         started={Boolean(state?.started)}
+        ref={inspectorRef}
       />
     </>
   );
@@ -171,12 +194,14 @@ function RepositoryInspector({
   projectId,
   started,
   hiddenPanes,
+  ref,
 }: {
   base: string;
   threadId: string;
   projectId: string;
   started: boolean;
   hiddenPanes: string[];
+  ref: Ref<RepositoryInspectorHandle>;
 }) {
   const { resolvedTheme } = useTheme();
   const themeType = resolvedTheme === "dark" ? "dark" : "light";
@@ -191,8 +216,8 @@ function RepositoryInspector({
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [view, setView] = useState<RepositoryState["view"]>(cached?.view);
-  const selection = useRef(0);
+  const [view, setView] = useState<RepositoryView | undefined>(cached?.view);
+  const selection = useRef((cached?.view as RepositoryView)?.navigationId ?? 0);
   const selected = useRef<{ path: string; staged?: boolean | "branch" }>(
     cached?.selected,
   );
@@ -269,36 +294,50 @@ function RepositoryInspector({
       document.removeEventListener("visibilitychange", visible);
     };
   }, [base, revision, started]);
-  async function open(path: string, staged?: boolean | "branch") {
-    const request = ++selection.current;
-    selected.current = { path, staged };
-    setView(undefined);
-    setPending(true);
-    setError("");
-    try {
-      const result = await apiRequest<{ content?: string; patch?: string }>(
-        viewUrl(base, path, staged),
-      );
-      if (request === selection.current)
-        setView({
-          path,
-          ...result,
-          label:
-            staged === "branch"
-              ? "branch diff"
-              : staged === undefined
-                ? "file"
-                : staged
-                  ? "staged diff"
-                  : "unstaged diff",
-        });
-    } catch (error) {
-      if (request === selection.current)
-        setError(error instanceof Error ? error.message : "Read failed.");
-    } finally {
-      if (request === selection.current) setPending(false);
-    }
-  }
+  const open = useCallback(
+    async (
+      path: string,
+      staged?: boolean | "branch",
+      lines?: RepositoryFileLink,
+    ) => {
+      const request = ++selection.current;
+      selected.current = { path, staged };
+      setView(undefined);
+      setPending(true);
+      setError("");
+      try {
+        const result = await apiRequest<{ content?: string; patch?: string }>(
+          viewUrl(base, path, staged),
+        );
+        if (request === selection.current)
+          setView({
+            ...lines,
+            path,
+            ...result,
+            navigationId: request,
+            label:
+              staged === "branch"
+                ? "branch diff"
+                : staged === undefined
+                  ? "file"
+                  : staged
+                    ? "staged diff"
+                    : "unstaged diff",
+          });
+      } catch (error) {
+        if (request === selection.current)
+          setError(error instanceof Error ? error.message : "Read failed.");
+      } finally {
+        if (request === selection.current) setPending(false);
+      }
+    },
+    [base],
+  );
+  useImperativeHandle(
+    ref,
+    () => ({ openFile: (file) => void open(file.path, undefined, file) }),
+    [open],
+  );
   return (
     <>
       <Panel
@@ -345,9 +384,11 @@ function RepositoryInspector({
           {view ? (
             <div className="min-h-0 flex-1 overflow-auto">
               {view.content !== undefined ? (
-                <File
-                  file={{ name: view.path, contents: view.content }}
-                  options={{ themeType }}
+                <RepositoryFileView
+                  key={view.navigationId}
+                  view={view}
+                  content={view.content}
+                  themeType={themeType}
                 />
               ) : view.patch ? (
                 <PatchDiff
@@ -516,4 +557,39 @@ function RepositoryInspector({
 
 function viewUrl(base: string, path: string, staged?: boolean | "branch") {
   return `${base}/${staged === "branch" ? "branch-diff" : staged === undefined ? "file" : "diff"}?path=${encodeURIComponent(path)}&staged=${staged === true}`;
+}
+
+function RepositoryFileView({
+  view,
+  content,
+  themeType,
+}: {
+  view: RepositoryFileLink;
+  content: string;
+  themeType: "light" | "dark";
+}) {
+  const scrolled = useRef(false);
+  return (
+    <File
+      file={{ name: view.path, contents: content }}
+      selectedLines={
+        view.startLine
+          ? { start: view.startLine, end: view.endLine ?? view.startLine }
+          : undefined
+      }
+      options={{
+        themeType,
+        onPostRender: (node, _instance, phase) => {
+          if (phase === "unmount" || scrolled.current || !view.startLine)
+            return;
+          const line = node.shadowRoot?.querySelector<HTMLElement>(
+            `[data-line="${view.startLine}"]`,
+          );
+          if (!line) return;
+          line.scrollIntoView({ block: "center", inline: "nearest" });
+          scrolled.current = true;
+        },
+      }}
+    />
+  );
 }

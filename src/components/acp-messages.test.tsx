@@ -71,3 +71,51 @@ test("thoughts stay distinct while prose retains sanitized HTML and remote image
   expect(html).toContain('src="https://images.test/preview"');
   expect(html).not.toContain("<script>");
 });
+
+test("rich messages keep block order and repository navigation without duplicate text", () => {
+  const html = renderToStaticMarkup(
+    <AcpMessages
+      threadId="t"
+      onOpenFile={() => {}}
+      messages={[
+        {
+          id: "rich",
+          role: "assistant",
+          text: "fallback must not duplicate",
+          content: [
+            { type: "text", text: "**Before**" },
+            { type: "image", mimeType: "image/png", data: "aGk=" },
+            { type: "text", text: "[Readme](README.md:12)" },
+          ],
+        },
+      ]}
+    />,
+  );
+  expect(html.match(/<article/g)).toHaveLength(1);
+  expect(html).not.toContain("fallback must not duplicate");
+  expect(html.indexOf("<strong>Before")).toBeLessThan(html.indexOf("<img"));
+  expect(html.indexOf("<img")).toBeLessThan(html.indexOf(">Readme</button>"));
+  expect(html).not.toContain('href="README');
+});
+
+test("rich tool text stays literal and keyboard-accessible", () => {
+  const html = renderToStaticMarkup(
+    <AcpMessages
+      messages={[
+        {
+          id: "tool",
+          role: "tool",
+          text: "Read file",
+          status: "failed",
+          content: [
+            { type: "text", text: "<script>unsafe</script> **literal**" },
+          ],
+        },
+      ]}
+    />,
+  );
+  expect(html).toContain('role="region"');
+  expect(html).toContain('tabindex="0"');
+  expect(html).toContain("&lt;script&gt;unsafe&lt;/script&gt; **literal**");
+  expect(html).not.toContain("<script>");
+});

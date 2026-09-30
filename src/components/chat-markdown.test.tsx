@@ -39,3 +39,19 @@ test("renders HTML and remote images but strips executable markup and unsafe URL
     'href="https://example.com" target="_blank" rel="noopener noreferrer"',
   );
 });
+
+test("renders repository references as file-open buttons after sanitization", () => {
+  const html = renderToStaticMarkup(
+    <ChatMarkdown threadId="thread-1" onOpenFile={() => {}}>
+      {
+        "[readme](README.md:12) [package](package.json:3) [source](src/page.tsx#L12-L20) [docs](https://example.com) [unsafe](javascript:alert%281%29) [traversal](../secret)"
+      }
+    </ChatMarkdown>,
+  );
+  expect(html.match(/<button/g)?.length).toBe(3);
+  expect(html).toContain(">readme</button>");
+  expect(html).toContain(">package</button>");
+  expect(html).toContain('href="https://example.com" target="_blank"');
+  expect(html).not.toContain("javascript:");
+  expect(html).toContain('href="../secret" target="_blank"');
+});

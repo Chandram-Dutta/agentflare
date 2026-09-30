@@ -3,7 +3,8 @@
 import { useId, useState } from "react";
 import { ChevronRight, Terminal } from "lucide-react";
 import type { AcpMessage } from "@/lib/acp";
-import { ChatMarkdown } from "./chat-markdown";
+import { ChatMarkdown, type RepositoryLinkProps } from "./chat-markdown";
+import { AcpContent } from "./acp-content";
 
 function ToolMessage({ message }: { message: AcpMessage }) {
   const [expanded, setExpanded] = useState<boolean>();
@@ -55,7 +56,16 @@ function ToolMessage({ message }: { message: AcpMessage }) {
         )}
       </button>
       <div id={outputId} hidden={!open} className="pb-3 pl-7 pr-2">
-        {output ? (
+        {message.content?.length ? (
+          <div
+            tabIndex={0}
+            role="region"
+            aria-label={`Tool output: ${title || "Tool call"}`}
+            className="max-h-72 overflow-auto border-l pl-3 pr-2"
+          >
+            <AcpContent blocks={message.content} literal />
+          </div>
+        ) : output ? (
           <pre
             tabIndex={0}
             role="region"
@@ -74,7 +84,11 @@ function ToolMessage({ message }: { message: AcpMessage }) {
   );
 }
 
-export function AcpMessages({ messages }: { messages: AcpMessage[] }) {
+export function AcpMessages({
+  messages,
+  threadId,
+  onOpenFile,
+}: { messages: AcpMessage[] } & RepositoryLinkProps) {
   return (
     <div className="space-y-5">
       {messages.map((message) => {
@@ -98,7 +112,17 @@ export function AcpMessages({ messages }: { messages: AcpMessage[] }) {
                 )}
               </summary>
               <div className="ml-1.5 mt-3 border-l pl-4">
-                <ChatMarkdown>{message.text}</ChatMarkdown>
+                {message.content?.length ? (
+                  <AcpContent
+                    blocks={message.content}
+                    threadId={threadId}
+                    onOpenFile={onOpenFile}
+                  />
+                ) : (
+                  <ChatMarkdown threadId={threadId} onOpenFile={onOpenFile}>
+                    {message.text}
+                  </ChatMarkdown>
+                )}
               </div>
             </details>
           );
@@ -118,7 +142,17 @@ export function AcpMessages({ messages }: { messages: AcpMessage[] }) {
               </span>
               {message.status && <span>/ {message.status}</span>}
             </header>
-            <ChatMarkdown>{message.text}</ChatMarkdown>
+            {message.content?.length ? (
+              <AcpContent
+                blocks={message.content}
+                threadId={threadId}
+                onOpenFile={onOpenFile}
+              />
+            ) : (
+              <ChatMarkdown threadId={threadId} onOpenFile={onOpenFile}>
+                {message.text}
+              </ChatMarkdown>
+            )}
           </article>
         );
       })}

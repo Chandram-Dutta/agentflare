@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 import { createBridge, createUserBridge } from "./bridge.mjs";
 
 const fake = fileURLToPath(new URL("./fake-agent.mjs", import.meta.url));
+const richAttachments = [
+  { type: "image", mimeType: "image/png", data: "aGk=" },
+  { type: "audio", mimeType: "audio/wav", data: "aGk=" },
+  { type: "resource", resource: { uri: "attachment:///note.txt", text: "literal <script>" } },
+  { type: "resource_link", uri: "file:///workspace/file.txt", name: "file.txt" },
+];
 async function until(condition) {
   for (let i = 0; i < 200; i++) {
     if (condition()) return;
@@ -32,6 +38,24 @@ async function fixture(run) {
     await rm(cwd, { recursive: true, force: true });
   }
 }
+
+test("rich prompts preserve block order in messages and tool output", async () =>
+  fixture(async (start, cwd) => {
+    await writeFile(join(cwd, "authenticated"), "synthetic");
+    const b = start();
+    await b.ready;
+    expect(b.snapshot.promptCapabilities.image).toBe(true);
+    await b.act({ type: "prompt", text: "rich", attachments: richAttachments, requestId: "rich" });
+    await until(() => b.snapshot.status === "ready");
+    expect(b.snapshot.messages[0].content).toEqual([{ type: "text", text: "rich" }, ...richAttachments]);
+    const answers = b.snapshot.messages.filter(m => m.role === "assistant");
+    expect(answers).toHaveLength(1);
+    expect(answers[0].content).toEqual([{ type: "text", text: "rich" }, ...richAttachments]);
+    expect(b.snapshot.messages.at(-1).content).toEqual([{ type: "text", text: "rich" }, ...richAttachments]);
+    await b.act({ type: "prompt", text: "", attachments: [richAttachments[0]], requestId: "image-only" });
+    await until(() => b.snapshot.status === "ready");
+    expect(b.snapshot.messages.at(-1).content).toEqual([richAttachments[0]]);
+  }));
 
 test("device-code acceptance is not authentication; stream and permission choices survive reads", async () =>
   fixture(async (start) => {
@@ -197,6 +221,19 @@ async function sharedFixture(authenticated, run) {
   const bridge = createUserBridge({ command: [process.execPath, fake, "shared"], root });
   try { await run(bridge, root); } finally { await bridge.close(); await rm(root, { recursive: true, force: true }); }
 }
+
+test("shared rich content remains isolated by session", async () => {
+  await sharedFixture(true, async (bridge) => {
+    const a = await bridge.session(threadA);
+    const b = await bridge.session(threadB);
+    await Promise.all([a.ready, b.ready]);
+    await a.act({ type: "prompt", text: "rich", requestId: "rich", attachments: richAttachments });
+    await until(() => a.snapshot.status === "ready");
+    expect(a.snapshot.messages.filter(m => m.role === "assistant")).toHaveLength(1);
+    expect(a.snapshot.messages.at(-1).content).toEqual([{ type: "text", text: "rich" }, ...richAttachments]);
+    expect(b.snapshot.messages).toEqual([]);
+  });
+});
 
 test("shared bridge isolates routing and deletion", async () => {
   await sharedFixture(true, async (bridge) => {

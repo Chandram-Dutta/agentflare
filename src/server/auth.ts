@@ -1,8 +1,42 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { drizzle } from "drizzle-orm/d1";
+import { and, eq } from "drizzle-orm";
 import * as schema from "./db/auth-schema";
-import { allowedGitHubIds, type Bindings } from "./env";
+import { allowedGitHubIds, installationReady, type Bindings } from "./env";
+
+export type Viewer = { id: string; name: string };
+
+// Shared by page rendering and API authorization. A cookie alone is not proof
+// of access: verify the database session and the current installation allowlist.
+export async function getViewer(
+  env: Bindings,
+  headers: Headers,
+): Promise<{
+  configured: boolean;
+  user: Viewer | null;
+  denied?: boolean;
+}> {
+  if (!installationReady(env)) return { configured: false, user: null };
+  const session = await createAuth(env).api.getSession({ headers });
+  if (!session) return { configured: true, user: null };
+  const identity = await drizzle(env.DB!)
+    .select({ id: schema.account.accountId })
+    .from(schema.account)
+    .where(
+      and(
+        eq(schema.account.userId, session.user.id),
+        eq(schema.account.providerId, "github"),
+      ),
+    )
+    .get();
+  if (!identity || !allowedGitHubIds(env).has(identity.id))
+    return { configured: true, user: null, denied: true };
+  return {
+    configured: true,
+    user: { id: session.user.id, name: session.user.name },
+  };
+}
 
 export function createAuth(env: Bindings) {
   const allowed = allowedGitHubIds(env);

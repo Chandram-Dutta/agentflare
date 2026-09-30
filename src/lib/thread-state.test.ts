@@ -23,6 +23,33 @@ function storeWith(
   return new ThreadStateStore(request as typeof apiRequest);
 }
 
+test("accepted rich sends clear submitted attachments and preserve newer attachments", async () => {
+  const response = deferred<AcpSnapshot>();
+  const store = storeWith(async () => response.promise);
+  const attachments = [
+    { type: "image" as const, mimeType: "image/png", data: "aGk=" },
+  ];
+  store.update("a", { draft: "", attachments });
+  const sending = store.action("a", {
+    type: "prompt",
+    text: "",
+    requestId: "image",
+    attachments,
+  });
+  const newer = [{ type: "text" as const, text: "new context" }];
+  store.update("a", { attachments: newer });
+  response.resolve(running);
+  await sending;
+  expect(store.get("a").attachments).toBe(newer);
+  await store.action("a", {
+    type: "prompt",
+    text: "",
+    requestId: "new",
+    attachments: newer,
+  });
+  expect(store.get("a").attachments).toBeUndefined();
+});
+
 test("switching shares an in-flight connect and retains isolated drafts and snapshots", async () => {
   const connect = deferred<AcpSnapshot>();
   const calls: string[] = [];

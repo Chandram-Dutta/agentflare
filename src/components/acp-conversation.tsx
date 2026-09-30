@@ -1,11 +1,19 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { ArrowUp, SquareTerminal, LogOut, Square } from "lucide-react";
 import { createPortal } from "react-dom";
 import { Button } from "./ui/button";
 import { AcpMessages } from "./acp-messages";
 import { AcpComposerControls } from "./acp-composer-controls";
+import { AcpAttachments } from "./acp-attachments";
+import type { RepositoryLinkProps } from "./chat-markdown";
 import type { AcpAction } from "@/lib/acp";
 import { useThreadStore, useThreadState } from "./thread-state";
 
@@ -26,14 +34,17 @@ function safeLoginUrl(value: string): string | null {
 export function AcpConversation({
   threadId,
   headerTarget,
+  onOpenFile,
 }: {
   threadId: string;
   headerTarget?: HTMLDivElement | null;
-}) {
+} & RepositoryLinkProps) {
   const store = useThreadStore();
+  const [attachmentReading, setAttachmentReading] = useState(false);
   const {
     snapshot,
     draft: prompt,
+    attachments,
     error: networkError,
     pending: actionPending,
   } = useThreadState(threadId);
@@ -63,10 +74,17 @@ export function AcpConversation({
   async function send(event: FormEvent) {
     event.preventDefault();
     const text = prompt.trim();
-    if (!text || snapshot?.status !== "ready" || actionPending) return;
+    if (
+      (!text && !attachments?.length) ||
+      snapshot?.status !== "ready" ||
+      actionPending ||
+      attachmentReading
+    )
+      return;
     await action({
       type: "prompt",
       text,
+      attachments,
       requestId: crypto.randomUUID(),
     });
   }
@@ -164,7 +182,13 @@ export function AcpConversation({
               Codex is ready. Send a developer task below.
             </p>
           )}
-          {snapshot && <AcpMessages messages={snapshot.messages} />}
+          {snapshot && (
+            <AcpMessages
+              messages={snapshot.messages}
+              threadId={threadId}
+              onOpenFile={onOpenFile}
+            />
+          )}
 
           {snapshot?.status === "auth-required" && (
             <div className="border p-3">
@@ -307,6 +331,13 @@ export function AcpConversation({
           disabled={!idle || actionPending}
           onAction={(value) => void action(value)}
         />
+        <AcpAttachments
+          attachments={attachments ?? []}
+          capabilities={snapshot?.promptCapabilities}
+          disabled={!idle || actionPending}
+          onChange={(attachments) => store.update(threadId, { attachments })}
+          onReadingChange={setAttachmentReading}
+        />
         <div className="mx-auto flex w-full max-w-3xl items-end gap-2">
           <textarea
             aria-label="Message Codex"
@@ -331,7 +362,12 @@ export function AcpConversation({
             aria-label="Send message"
             title="Send message (Ctrl/⌘ + Enter)"
             className="rounded-md"
-            disabled={!idle || actionPending || !prompt.trim()}
+            disabled={
+              !idle ||
+              actionPending ||
+              attachmentReading ||
+              (!prompt.trim() && !attachments?.length)
+            }
           >
             <ArrowUp className="size-4" aria-hidden="true" />
           </Button>

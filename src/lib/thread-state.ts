@@ -1,4 +1,4 @@
-import type { AcpAction, AcpActivity, AcpSnapshot } from "./acp";
+import type { AcpAction, AcpActivity, AcpSnapshot, AcpContent } from "./acp";
 import type { RuntimeState, BranchReview, GitChange } from "./runtime";
 import { apiRequest } from "./api-client";
 
@@ -6,7 +6,15 @@ export type RepositoryState = {
   files: string[];
   changes: GitChange[];
   review?: BranchReview;
-  view?: { path: string; content?: string; patch?: string; label: string };
+  view?: {
+    path: string;
+    content?: string;
+    patch?: string;
+    label: string;
+    startLine?: number;
+    endLine?: number;
+    navigationId?: number;
+  };
   selected?: { path: string; staged?: boolean | "branch" };
   tab: string;
 };
@@ -14,6 +22,7 @@ export type ThreadState = {
   runtime?: RuntimeState;
   snapshot?: AcpSnapshot;
   draft: string;
+  attachments?: AcpContent[];
   scroll?: number;
   pending: boolean;
   error: string;
@@ -178,6 +187,11 @@ export class ThreadStateStore {
       // Clear only the submitted draft, not text typed while the request ran.
       if (action.type === "prompt" && this.get(id).draft.trim() === action.text)
         this.update(id, { draft: "" });
+      if (
+        action.type === "prompt" &&
+        this.get(id).attachments === action.attachments
+      )
+        this.update(id, { attachments: undefined });
       return true;
     } catch (error) {
       if (this.versions.get(id) === version)

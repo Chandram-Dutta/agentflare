@@ -11,6 +11,7 @@ import { readFile } from "node:fs/promises";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import type { D1Database } from "@cloudflare/workers-types";
 import { api } from "./api";
+import { getViewer } from "./auth";
 import type { Bindings } from "./env";
 import type { Project, Thread, WorkspaceData } from "@/lib/workspace";
 
@@ -209,7 +210,8 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
   for (const [length, status] of [
     [16000, 503],
     [16001, 400],
-    [100001, 413],
+    [100001, 400],
+    [2100001, 413],
   ]) {
     expect(
       (
@@ -221,6 +223,18 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
       ).status,
     ).toBe(status);
   }
+  expect(
+    (
+      await request(`/threads/${thread.id}/runtime/acp`, "POST", {
+        type: "prompt",
+        text: "",
+        requestId: "attachment",
+        attachments: [
+          { type: "image", mimeType: "image/png", data: "a".repeat(120000) },
+        ],
+      })
+    ).status,
+  ).toBe(503);
   expect(
     (
       await request(
@@ -339,6 +353,27 @@ async function createThread(
   expect(response.status).toBe(201);
   return response.json();
 }
+
+test("page session resolution verifies cookies, admission and revocation without exposing tokens", async () => {
+  const alice = new Headers({ cookie: cookie() });
+  expect(await getViewer(env, alice)).toEqual({
+    configured: true,
+    user: { id: "alice", name: "alice" },
+  });
+  expect(await getViewer(env, new Headers({ cookie: cookie("bob") }))).toEqual({
+    configured: true,
+    user: { id: "bob", name: "bob" },
+  });
+  expect(
+    await getViewer(env, new Headers({ cookie: cookie("alice", "forged") })),
+  ).toEqual({ configured: true, user: null });
+  expect(await getViewer({ ...env, ALLOWED_GITHUB_IDS: "202" }, alice)).toEqual(
+    { configured: true, user: null, denied: true },
+  );
+  await env.DB.prepare("DELETE FROM session WHERE user_id = 'alice'").run();
+  expect(await getViewer(env, alice)).toEqual({ configured: true, user: null });
+  expect(await getViewer({}, alice)).toEqual({ configured: false, user: null });
+});
 
 test("new Codex threads share a user runtime while existing metadata defaults to legacy", async () => {
   const project = await createProject();

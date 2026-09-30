@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
+import { retainContent, appendContent, boundContent, promptContent } from "./content.mjs";
 import { createAuthCheckpoint } from "./auth-checkpoint.mjs";
 
 // The bridge owns the conversation, not a browser connection. Only this fixed
@@ -145,16 +146,28 @@ export function createBridge({
         u.sessionUpdate === "agent_message_chunk"
           ? "assistant"
           : u.sessionUpdate === "agent_thought_chunk" ? "thought" : "user";
-      if (u.content?.type !== "text") return;
+      const explicitId =
+        typeof u.messageId === "string" && u.messageId ? u.messageId : undefined;
       const last = snapshot.messages.at(-1);
-      if (last && last.id === currentMessage && last.role === role) {
-        if (last.text.length + u.content.text.length > 64000)
-          snapshot.truncated = true;
-        last.text = (last.text + u.content.text).slice(0, 64000);
+      const id = explicitId ??
+        (last && last.id === currentMessage && last.role === role
+          ? currentMessage
+          : crypto.randomUUID());
+      if (last && last.id === id && last.role === role) {
+        last.content ??= last.text
+          ? [{ type: "text", text: last.text }]
+          : [];
+        if (appendContent(last, u.content)) snapshot.truncated = true;
+        if (u.content?.type === "text") {
+          if (last.text.length + u.content.text.length > 64000)
+            snapshot.truncated = true;
+          last.text = (last.text + u.content.text).slice(0, 64000);
+        }
       } else {
-        currentMessage = crypto.randomUUID();
-        append(role, u.content.text, currentMessage);
+        append(role, u.content?.type === "text" ? u.content.text : "", id);
+        snapshot.messages.at(-1).content = [retainContent(u.content)];
       }
+      currentMessage = id;
     } else if (u.sessionUpdate === "config_option_update") {
       const previousModel = snapshot.configOptions.find(
         (option) => option.id === "model" || option.category === "model",
@@ -196,12 +209,17 @@ export function createBridge({
         ?.filter((c) => c.type === "content" && c.content?.type === "text")
         .map((c) => c.content.text)
         .join("\n");
+      if (u.content)
+        item.content = u.content
+          .filter((entry) => entry.type === "content")
+          .map((entry) => retainContent(entry.content));
       if (text)
         item.text = `${u.title ?? item.text.split("\n")[0]}\n${text}`.slice(
           0,
           64000,
         );
     }
+    boundContent(snapshot);
     boundTranscript();
   }
 
@@ -312,6 +330,7 @@ export function createBridge({
       await rename(`${sessionFile}.tmp`, sessionFile);
     }
     if (dead) throw new Error("Disconnected");
+    snapshot.promptCapabilities = initialized.agentCapabilities?.promptCapabilities ?? {};
     snapshot.status = "ready";
     delete snapshot.error;
   }
@@ -378,21 +397,24 @@ export function createBridge({
       if (
         snapshot.status !== "ready" ||
         typeof action.text !== "string" ||
-        !action.text.trim() ||
+        (!action.text.trim() && !action.attachments?.length) ||
         action.text.length > 16000 ||
         typeof action.requestId !== "string"
       )
         throw new Error("Cannot send prompt");
+      const content = promptContent(action, snapshot.promptCapabilities);
       promptIds.add(action.requestId);
       if (promptIds.size > 1000)
         promptIds.delete(promptIds.values().next().value);
       append("user", action.text, action.requestId);
+      if (action.attachments?.length) snapshot.messages.at(-1).content = content;
+      boundContent(snapshot);
       currentMessage = undefined;
       snapshot.status = "running";
       void agent
         .request(methods.agent.session.prompt, {
           sessionId,
-          prompt: [{ type: "text", text: action.text }],
+          prompt: content,
         })
         .then(() => {
           settlePending();
@@ -536,14 +558,23 @@ export function createUserBridge({
   const update = (c, u) => {
     const s = c.snapshot;
     if (["agent_message_chunk", "user_message_chunk", "agent_thought_chunk"].includes(u.sessionUpdate)) {
-      if (u.content?.type !== "text") return;
       const role = u.sessionUpdate === "agent_message_chunk" ? "assistant" : u.sessionUpdate === "agent_thought_chunk" ? "thought" : "user";
       const last = s.messages.at(-1);
-      if (last && last.id === c.currentMessage && last.role === role) {
-        if (last.text.length + u.content.text.length > 64000) s.truncated = true;
-        last.text = (last.text + u.content.text).slice(0, 64000);
+      const explicitId = typeof u.messageId === "string" && u.messageId ? u.messageId : undefined;
+      const id = explicitId ?? (last && last.id === c.currentMessage && last.role === role ? c.currentMessage : crypto.randomUUID());
+      if (last && last.id === id && last.role === role) {
+        last.content ??= last.text ? [{ type: "text", text: last.text }] : [];
+        if (appendContent(last, u.content)) s.truncated = true;
+        if (u.content?.type === "text") {
+          if (last.text.length + u.content.text.length > 64000) s.truncated = true;
+          last.text = (last.text + u.content.text).slice(0, 64000);
+        }
       }
-      else { c.currentMessage = crypto.randomUUID(); append(c, role, u.content.text, c.currentMessage); }
+      else {
+        append(c, role, u.content?.type === "text" ? u.content.text : "", id);
+        s.messages.at(-1).content = [retainContent(u.content)];
+      }
+      c.currentMessage = id;
     } else if (u.sessionUpdate === "config_option_update") {
       const before = s.configOptions.find(o => o.id === "model" || o.category === "model")?.currentValue;
       s.configOptions = normalize(u.configOptions);
@@ -561,8 +592,10 @@ export function createUserBridge({
       if (u.title) item.text = u.title.slice(0, 64000);
       if (u.status) item.status = u.status;
       const text = u.content?.filter(x => x.type === "content" && x.content?.type === "text").map(x => x.content.text).join("\n");
+      if (u.content) item.content = u.content.filter(x => x.type === "content").map(x => retainContent(x.content));
       if (text) item.text = `${u.title ?? item.text.split("\n")[0]}\n${text}`.slice(0, 64000);
     }
+    boundContent(s);
     bound(s);
   };
 
@@ -632,6 +665,7 @@ export function createUserBridge({
       await rename(`${c.sessionFile}.tmp`, c.sessionFile);
     }
     c.snapshot.configOptions = normalize(result.configOptions, result.modes);
+    c.snapshot.promptCapabilities = initialized.agentCapabilities?.promptCapabilities ?? {};
     if (dead || c.deleted) throw Error("Disconnected");
     c.snapshot.status = "ready";
     delete c.snapshot.error;
@@ -659,11 +693,15 @@ export function createUserBridge({
       if (action.action === "cancel") { login = undefined; for (const x of contexts.values()) delete x.snapshot.login; }
     } else if (action.type === "prompt") {
       if (c.promptIds.has(action.requestId)) return;
-      if (c.snapshot.status !== "ready" || typeof action.text !== "string" || !action.text.trim() || action.text.length > 16000 || typeof action.requestId !== "string") throw new Error("Cannot send prompt");
+      if (c.snapshot.status !== "ready" || typeof action.text !== "string" || (!action.text.trim() && !action.attachments?.length) || action.text.length > 16000 || typeof action.requestId !== "string") throw new Error("Cannot send prompt");
+      const content = promptContent(action, c.snapshot.promptCapabilities);
       c.promptIds.add(action.requestId); if (c.promptIds.size > 1000) c.promptIds.delete(c.promptIds.values().next().value);
       c.turn = action.requestId;
-      append(c, "user", action.text, action.requestId); c.currentMessage = undefined; c.snapshot.status = "running";
-      c.prompt = agent.request(methods.agent.session.prompt, { sessionId: c.sessionId, prompt: [{ type: "text", text: action.text }] })
+      append(c, "user", action.text, action.requestId);
+      if (action.attachments?.length) c.snapshot.messages.at(-1).content = content;
+      boundContent(c.snapshot);
+      c.currentMessage = undefined; c.snapshot.status = "running";
+      c.prompt = agent.request(methods.agent.session.prompt, { sessionId: c.sessionId, prompt: content })
         .then(() => { settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; }).catch((e) => fail(c, e));
     } else if (action.type === "permission") {
       const p = c.permissions.get(action.id);
@@ -729,7 +767,7 @@ if (import.meta.main) {
   const server = Bun.serve({
     hostname: "0.0.0.0", // Reachable only through the authenticated Worker/DO.
     port: 8766,
-    maxRequestBodySize: 100000,
+    maxRequestBodySize: 2_100_000,
     async fetch(request) {
       const path = new URL(request.url).pathname;
       if (shared && path === "/health") return new Response(null, { status: bridge.isAlive() ? 204 : 503 });

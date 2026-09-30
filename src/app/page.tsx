@@ -1,5 +1,25 @@
-import { Workspace } from "@/components/workspace";
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { env } from "cloudflare:workers";
+import { getViewer } from "@/server/auth";
+import { LandingPage } from "@/components/landing-page";
 
-export default function Home() {
-  return <Workspace />;
+export const dynamic = "force-dynamic";
+
+export default async function Home({ searchParams }: PageProps<"/">) {
+  const session = await getViewer(env, await headers());
+  if (session.user) redirect("/workspace");
+  const params = await searchParams;
+  return (
+    <LandingPage
+      configured={session.configured}
+      initialError={
+        session.denied
+          ? "This account is no longer allowed on this installation. Contact the operator."
+          : params.auth === "failed"
+            ? "GitHub sign-in failed. Check that your account is allowed by this installation."
+            : ""
+      }
+    />
+  );
 }

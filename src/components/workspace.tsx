@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { ThemeProvider, useTheme } from "next-themes";
+import { useTheme } from "next-themes";
 import { createPortal } from "react-dom";
 import {
   Moon,
@@ -46,7 +46,7 @@ import {
   useThreadStore,
 } from "./thread-state";
 import { ProjectSettings } from "@/components/project-settings";
-import { LandingPage } from "./landing-page";
+import type { Viewer } from "@/server/auth";
 import { apiRequest } from "@/lib/api-client";
 import {
   agents,
@@ -56,75 +56,17 @@ import {
   type WorkspaceData,
 } from "@/lib/workspace";
 
-type Session = {
-  configured: boolean;
-  user: { id: string; name: string } | null;
-};
-
-export function Workspace() {
-  return (
-    <ThemeProvider
-      attribute="class"
-      storageKey="agentflare-theme"
-      defaultTheme="system"
-      enableSystem
-      disableTransitionOnChange
-    >
-      <WorkspaceContent />
-    </ThemeProvider>
-  );
-}
-
-function WorkspaceContent() {
+export function Workspace({ user }: { user: Viewer }) {
   const { resolvedTheme, setTheme } = useTheme();
-  const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    void apiRequest<Session>("/session")
-      .then((result) => {
-        if (cancelled) return;
-        setSession(result);
-        if (
-          new URLSearchParams(window.location.search).get("auth") === "failed"
-        ) {
-          setError(
-            "GitHub sign-in failed. Check that your account is allowed by this installation.",
-          );
-        }
-      })
-      .catch((error: Error) => {
-        if (!cancelled) setError(error.message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  async function signIn() {
-    setPending(true);
-    setError("");
-    try {
-      const { url } = await apiRequest<{ url: string }>(
-        "/auth/sign-in/social",
-        "POST",
-        {},
-      );
-      window.location.assign(url);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Sign-in failed.");
-      setPending(false);
-    }
-  }
 
   async function signOut() {
     setPending(true);
     setError("");
     try {
       await apiRequest("/auth/sign-out", "POST", {});
-      setSession({ configured: true, user: null });
+      window.location.replace("/");
     } catch (error) {
       setError(error instanceof Error ? error.message : "Sign-out failed.");
     } finally {
@@ -140,10 +82,10 @@ function WorkspaceContent() {
         </h1>
         <div className="flex min-w-0 flex-1 items-center gap-1">{projects}</div>
         <div className="flex shrink-0 items-center gap-1 text-muted-foreground">
-          {session?.user && (
+          {user && (
             <>
               <span className="mr-2 hidden max-w-24 truncate text-[11px] lg:block">
-                {session.user.name}
+                {user.name}
               </span>
               <Button
                 variant="ghost"
@@ -175,16 +117,6 @@ function WorkspaceContent() {
       </header>
     );
   }
-
-  if (!session?.user)
-    return (
-      <LandingPage
-        configured={session?.configured}
-        pending={pending}
-        error={error}
-        onSignIn={signIn}
-      />
-    );
 
   return (
     <div className="workspace-shell flex min-h-dvh flex-col">
@@ -657,6 +589,9 @@ function ProjectWorkspace({
           threadId={thread?.id}
           projectId={project.id}
           hiddenPanes={hiddenPanes}
+          onShowViewer={() => {
+            if (hiddenPanes.includes("viewer")) togglePane("viewer");
+          }}
         >
           {(started) =>
             thread ? (
