@@ -173,6 +173,19 @@ proxy: Docker builds and ordinary containers can work while the full local
 Containers runtime cannot. In that case the deployment must be smoke-tested on
 Cloudflare; do not treat unit tests as proof of the live PTY path.
 
+To check resize signaling without Wrangler's network proxy:
+
+```sh
+docker build -t agentflare-resize:local .
+docker run --rm -v "$PWD/scripts/runtime-smoke/pty-resize.ts:/tmp/pty-resize.ts:ro" \
+  --entrypoint bun agentflare-resize:local /tmp/pty-resize.ts
+```
+
+This checks shrink/grow notifications, exact terminal geometry, and subsequent
+input using the image's Bun and agent launcher. The launcher acquires a controlling
+terminal so the SDK's pre-created PTY delivers SIGWINCH to the CLI. This is a
+local process-level regression check, not a live Cloudflare or agent UI test.
+
 Still needed: R2 checkpoints and restore, encrypted reusable agent credentials,
 controlled publishing, agent restart/stop UX, and per-user runtime budgets.
 

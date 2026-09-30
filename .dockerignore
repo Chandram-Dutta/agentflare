@@ -2,3 +2,4 @@
 !Dockerfile
 !sandbox/
 !sandbox/repository.mjs
+!sandbox/launch-agent.sh
