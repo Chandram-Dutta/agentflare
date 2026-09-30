@@ -1,12 +1,18 @@
 import type { AcpAction, AcpActivity, AcpSnapshot } from "./acp";
 import type { RuntimeState, BranchReview, GitChange } from "./runtime";
 import { apiRequest } from "./api-client";
+import type { RepositoryFileLink } from "./repository-links";
 
 export type RepositoryState = {
   files: string[];
   changes: GitChange[];
   review?: BranchReview;
-  view?: { path: string; content?: string; patch?: string; label: string };
+  view?: RepositoryFileLink & {
+    content?: string;
+    patch?: string;
+    label: string;
+    navigationId?: number;
+  };
   selected?: { path: string; staged?: boolean | "branch" };
   tab: string;
 };

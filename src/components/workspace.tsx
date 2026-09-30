@@ -657,6 +657,9 @@ function ProjectWorkspace({
           threadId={thread?.id}
           projectId={project.id}
           hiddenPanes={hiddenPanes}
+          onShowViewer={() => {
+            if (hiddenPanes.includes("viewer")) togglePane("viewer");
+          }}
         >
           {(started) =>
             thread ? (

@@ -8,6 +8,7 @@ import { AcpMessages } from "./acp-messages";
 import { AcpComposerControls } from "./acp-composer-controls";
 import type { AcpAction } from "@/lib/acp";
 import { useThreadStore, useThreadState } from "./thread-state";
+import type { RepositoryFileLink } from "@/lib/repository-links";
 
 function safeLoginUrl(value: string): string | null {
   try {
@@ -26,9 +27,11 @@ function safeLoginUrl(value: string): string | null {
 export function AcpConversation({
   threadId,
   headerTarget,
+  onOpenFile,
 }: {
   threadId: string;
   headerTarget?: HTMLDivElement | null;
+  onOpenFile?: (file: RepositoryFileLink) => void;
 }) {
   const store = useThreadStore();
   const {
@@ -164,7 +167,13 @@ export function AcpConversation({
               Codex is ready. Send a developer task below.
             </p>
           )}
-          {snapshot && <AcpMessages messages={snapshot.messages} />}
+          {snapshot && (
+            <AcpMessages
+              messages={snapshot.messages}
+              threadId={threadId}
+              onOpenFile={onOpenFile}
+            />
+          )}
 
           {snapshot?.status === "auth-required" && (
             <div className="border p-3">

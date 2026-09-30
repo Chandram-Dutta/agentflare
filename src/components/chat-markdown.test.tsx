@@ -39,3 +39,20 @@ test("renders HTML and remote images but strips executable markup and unsafe URL
     'href="https://example.com" target="_blank" rel="noopener noreferrer"',
   );
 });
+
+test("repository references are links within the workspace while web links open externally", () => {
+  const root = "/workspace/threads/thread-1/repo";
+  const html = renderToStaticMarkup(
+    <ChatMarkdown threadId="thread-1" onOpenFile={() => {}}>
+      {`[readme](${root}/README.md:12)\n\n[source](src/page.tsx#L12-L20)\n\n[docs](https://example.com)\n\n[unsafe](javascript:alert%281%29)`}
+    </ChatMarkdown>,
+  );
+  expect(html).toContain(
+    `href="${root}/README.md:12" rel="noopener noreferrer"`,
+  );
+  expect(html).toContain(
+    'href="src/page.tsx#L12-L20" rel="noopener noreferrer"',
+  );
+  expect(html).toContain('href="https://example.com" target="_blank"');
+  expect(html).not.toContain("javascript:");
+});

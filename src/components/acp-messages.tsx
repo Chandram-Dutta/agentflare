@@ -3,7 +3,7 @@
 import { useId, useState } from "react";
 import { ChevronRight, Terminal } from "lucide-react";
 import type { AcpMessage } from "@/lib/acp";
-import { ChatMarkdown } from "./chat-markdown";
+import { ChatMarkdown, type RepositoryLinkProps } from "./chat-markdown";
 
 function ToolMessage({ message }: { message: AcpMessage }) {
   const [expanded, setExpanded] = useState<boolean>();
@@ -74,7 +74,10 @@ function ToolMessage({ message }: { message: AcpMessage }) {
   );
 }
 
-export function AcpMessages({ messages }: { messages: AcpMessage[] }) {
+export function AcpMessages({
+  messages,
+  ...fileLinks
+}: { messages: AcpMessage[] } & RepositoryLinkProps) {
   return (
     <div className="space-y-5">
       {messages.map((message) => {
@@ -98,7 +101,7 @@ export function AcpMessages({ messages }: { messages: AcpMessage[] }) {
                 )}
               </summary>
               <div className="ml-1.5 mt-3 border-l pl-4">
-                <ChatMarkdown>{message.text}</ChatMarkdown>
+                <ChatMarkdown {...fileLinks}>{message.text}</ChatMarkdown>
               </div>
             </details>
           );
@@ -118,7 +121,7 @@ export function AcpMessages({ messages }: { messages: AcpMessage[] }) {
               </span>
               {message.status && <span>/ {message.status}</span>}
             </header>
-            <ChatMarkdown>{message.text}</ChatMarkdown>
+            <ChatMarkdown {...fileLinks}>{message.text}</ChatMarkdown>
           </article>
         );
       })}

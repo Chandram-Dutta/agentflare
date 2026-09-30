@@ -71,3 +71,31 @@ test("thoughts stay distinct while prose retains sanitized HTML and remote image
   expect(html).toContain('src="https://images.test/preview"');
   expect(html).not.toContain("<script>");
 });
+
+test("repository links are wired through assistant messages and thoughts", () => {
+  const html = renderToStaticMarkup(
+    <AcpMessages
+      threadId="thread-1"
+      onOpenFile={() => {}}
+      messages={[
+        {
+          id: "thought",
+          role: "thought",
+          text: "[source](/workspace/threads/thread-1/repo/src/page.tsx:12)",
+        },
+        {
+          id: "answer",
+          role: "assistant",
+          text: "[readme](/workspace/threads/thread-1/repo/README.md)",
+        },
+      ]}
+    />,
+  );
+  expect(html).toContain(
+    'href="/workspace/threads/thread-1/repo/src/page.tsx:12" rel="noopener noreferrer"',
+  );
+  expect(html).toContain(
+    'href="/workspace/threads/thread-1/repo/README.md" rel="noopener noreferrer"',
+  );
+  expect(html).not.toContain('target="_blank"');
+});
