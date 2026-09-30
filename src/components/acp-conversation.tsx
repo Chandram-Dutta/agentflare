@@ -180,24 +180,33 @@ export function AcpConversation({ threadId }: { threadId: string }) {
               Codex is ready. Send a developer task below.
             </p>
           )}
-          {snapshot?.messages.map((message) => (
-            <article
-              key={message.id}
-              className={
-                message.role === "user"
-                  ? "border-l-2 border-primary pl-3"
-                  : "pl-3"
-              }
-            >
-              <header className="mb-1 text-[10px] text-muted-foreground">
-                {message.role}
-                {message.status ? ` / ${message.status}` : ""}
-              </header>
-              <p className="whitespace-pre-wrap break-words leading-5">
-                {message.text}
-              </p>
-            </article>
-          ))}
+          {snapshot?.messages.map((message) =>
+            message.role === "thought" ? (
+              <details key={message.id} className="pl-3 text-muted-foreground">
+                <summary className="cursor-pointer text-[10px]">Thinking</summary>
+                <p className="mt-1 whitespace-pre-wrap break-words leading-5">
+                  {message.text}
+                </p>
+              </details>
+            ) : (
+              <article
+                key={message.id}
+                className={
+                  message.role === "user"
+                    ? "border-l-2 border-primary pl-3"
+                    : "pl-3"
+                }
+              >
+                <header className="mb-1 text-[10px] text-muted-foreground">
+                  {message.role}
+                  {message.status ? ` / ${message.status}` : ""}
+                </header>
+                <p className="whitespace-pre-wrap break-words leading-5">
+                  {message.text}
+                </p>
+              </article>
+            ),
+          )}
 
           {snapshot?.status === "auth-required" && (
             <div className="border p-3">
@@ -331,6 +340,73 @@ export function AcpConversation({ threadId }: { threadId: string }) {
       </div>
 
       <form onSubmit={send} className="border-t p-3">
+        <div className="mx-auto mb-2 flex w-full max-w-3xl flex-wrap items-end gap-x-3 gap-y-2">
+          {snapshot?.configOptions?.map((option) => {
+            const selected = option.options.find(
+              (choice) => choice.value === option.currentValue,
+            );
+            return (
+              <label
+                key={option.id}
+                className="flex min-w-28 flex-col gap-1 text-[10px] text-muted-foreground"
+                title={option.description ?? selected?.description}
+              >
+                {option.name}
+                <select
+                  value={option.currentValue}
+                  disabled={!idle || actionPending}
+                  onChange={(event) =>
+                    void action({
+                      type: "set-config",
+                      configId: option.id,
+                      value: event.currentTarget.value,
+                    })
+                  }
+                  className="h-7 max-w-48 border bg-background px-1 text-xs text-foreground disabled:opacity-60"
+                >
+                  {option.options.map((choice) => (
+                    <option
+                      key={choice.value}
+                      value={choice.value}
+                      title={choice.description}
+                    >
+                      {choice.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            );
+          })}
+          <div
+            className="ml-auto min-w-36 text-[10px] text-muted-foreground"
+            title="Last Codex-reported context estimate; not cumulative billable tokens or ChatGPT plan quota."
+          >
+            {snapshot?.contextUsage ? (
+              <>
+                <div className="mb-1 flex justify-between gap-2">
+                  <span>context (last reported)</span>
+                  <span>
+                    {snapshot.contextUsage.used.toLocaleString()} /{" "}
+                    {snapshot.contextUsage.size.toLocaleString()} ({Math.round(
+                      (snapshot.contextUsage.used / snapshot.contextUsage.size) *
+                        100,
+                    )}%)
+                  </span>
+                </div>
+                <progress
+                  className="h-1 w-full"
+                  max={snapshot.contextUsage.size}
+                  value={Math.min(
+                    snapshot.contextUsage.used,
+                    snapshot.contextUsage.size,
+                  )}
+                />
+              </>
+            ) : (
+              <span>context unavailable — not yet reported</span>
+            )}
+          </div>
+        </div>
         <div className="mx-auto flex w-full max-w-3xl items-end gap-2">
           <textarea
             aria-label="Message Codex"

@@ -14,6 +14,34 @@ const update = (update) =>
 let login;
 let turn;
 const broken = process.argv.includes("broken");
+const initialConfig = [
+  {
+    type: "select",
+    id: "model",
+    name: "Model",
+    category: "model",
+    currentValue: "small",
+    options: [
+      { value: "small", name: "Small" },
+      { value: "large", name: "Large" },
+    ],
+  },
+  {
+    type: "select",
+    id: "reasoning_effort",
+    name: "Reasoning",
+    currentValue: "low",
+    options: [{ value: "low", name: "Low" }, { value: "high", name: "High" }],
+  },
+  {
+    type: "select",
+    id: "fast-mode",
+    name: "Speed",
+    description: "Faster responses with increased usage.",
+    currentValue: "off",
+    options: [{ value: "off", name: "Standard" }, { value: "on", name: "Fast" }],
+  },
+];
 createInterface({ input: process.stdin }).on("line", (line) => {
   const m = JSON.parse(line);
   if (m.method === "initialize") {
@@ -36,7 +64,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         content: { type: "text", text: "restored answer" },
       });
     }
-    reply(m.id, { sessionId: "saved-session" });
+    reply(m.id, {
+      sessionId: "saved-session",
+      configOptions: initialConfig,
+      modes: {
+        currentModeId: "workspace-write",
+        availableModes: [
+          { id: "read-only", name: "Read only" },
+          { id: "workspace-write", name: "Workspace write" },
+          { id: "agent", name: "Agent" },
+          { id: "agent-full-access", name: "Agent full access" },
+        ],
+      },
+    });
   } else if (m.method === "authenticate") {
     login = m.id;
     send({
@@ -73,6 +113,24 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       }
       return reply(m.id, { stopReason: "end_turn" });
     }
+    if (m.params.prompt[0].text === "telemetry") {
+      update({ sessionUpdate: "usage_update", used: -3, size: 100 });
+      update({ sessionUpdate: "usage_update", used: 25, size: 0 });
+      update({ sessionUpdate: "usage_update", used: 13, size: 101 });
+      update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "explicit thought" } });
+      update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "visible answer" } });
+      return reply(m.id, { stopReason: "end_turn" });
+    }
+    if (m.params.prompt[0].text === "config-event") {
+      update({
+        sessionUpdate: "config_option_update",
+        configOptions: [{
+          type: "select", id: "collaboration_mode", name: "Collaboration",
+          currentValue: "plan", options: [{ value: "plan", name: "Plan" }],
+        }],
+      });
+      return reply(m.id, { stopReason: "end_turn" });
+    }
     turn = m.id;
     update({
       sessionUpdate: "agent_message_chunk",
@@ -94,6 +152,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         ],
       },
     });
+  } else if (m.method === "session/set_config_option") {
+    if (process.argv.includes("crash-config")) return process.exit(1);
+    if (m.params.configId !== "model" || m.params.value !== "large")
+      return error(m.id, -32002);
+    setTimeout(() => reply(m.id, {
+      configOptions: [
+        {
+          type: "select", id: "model", name: "Model", category: "model",
+          currentValue: "large", options: [{ value: "small", name: "Small" }, { value: "large", name: "Large" }],
+        },
+        {
+          type: "select", id: "reasoning_effort", name: "Reasoning",
+          currentValue: "medium", options: [{ value: "medium", name: "Medium" }],
+        },
+      ],
+    }), 50);
   } else if (m.id === "permission" && turn) {
     const outcome = m.result.outcome;
     update({

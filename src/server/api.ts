@@ -365,9 +365,47 @@ api.patch("/threads/:id", async (c) => {
   return c.json(result);
 });
 
+api.delete("/threads/:id", async (c) => {
+  const db = c.get("db");
+  const owned = await db
+    .select({ id: thread.id })
+    .from(thread)
+    .innerJoin(project, eq(thread.projectId, project.id))
+    .where(
+      and(
+        eq(thread.id, c.req.param("id")),
+        eq(project.ownerId, c.get("user").id),
+      ),
+    )
+    .get();
+  if (!owned) return c.notFound();
+  if (!c.env.Sandboxes)
+    return c.json(
+      { error: "Configure the sandbox binding before deleting a thread." },
+      503,
+    );
+  try {
+    // UUIDs are already lowercase, matching getSandbox's named-object mapping.
+    const sandbox = c.env.Sandboxes.get(c.env.Sandboxes.idFromName(owned.id));
+    await sandbox.deleteWorkspace();
+  } catch {
+    return c.json(
+      { error: "Sandbox cleanup failed. The thread was kept; retry deletion." },
+      502,
+    );
+  }
+  await db.delete(thread).where(eq(thread.id, owned.id));
+  return c.json({ deleted: true });
+});
+
 const acpAction = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("connect") }),
   z.strictObject({ type: z.literal("authenticate") }),
+  z.strictObject({
+    type: z.literal("set-config"),
+    configId: z.string().min(1).max(128),
+    value: z.string().max(256),
+  }),
   z.strictObject({
     type: z.literal("prompt"),
     text: z.string().trim().min(1).max(16000),
@@ -421,9 +459,41 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
     return c.json(
       action ? await sandbox.acpAction(action) : await sandbox.acpSnapshot(),
     );
-  } catch {
+  } catch (error) {
+    console.error({
+      event: "acp_request_failed",
+      operation: action?.type ?? "snapshot",
+      type: error instanceof Error ? error.name : "unknown",
+      code:
+        error && typeof error === "object" && "code" in error
+          ? String(error.code)
+              .replace(/[^A-Z_0-9]/g, "")
+              .slice(0, 80)
+          : undefined,
+      frames:
+        error instanceof Error
+          ? error.stack?.split("\n").filter((line) => /^\s+at /.test(line))
+          : undefined,
+    });
+    const safeMessages = [
+      "Start this thread first.",
+      "This thread's sandbox has been deleted.",
+      "Sandbox files are no longer available. Create a new thread. Checkpoints are not implemented yet.",
+      "This sandbox is using an older image without Codex ACP. Start a new thread.",
+      "The Codex bridge exited during startup. Check the container logs.",
+      "Codex bridge did not become ready.",
+      "Connect Codex first.",
+    ];
+    const message =
+      error instanceof Error && safeMessages.includes(error.message)
+        ? error.message
+        : undefined;
     return c.json(
-      { error: "Codex is unavailable. Start the workspace and connect again." },
+      {
+        error:
+          message ??
+          "Codex connection failed. Check the installation's runtime logs for acp_request_failed.",
+      },
       409,
     );
   }

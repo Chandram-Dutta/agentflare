@@ -22,6 +22,11 @@ do not restart a turn. The UI polls snapshots once per second; this is not yet a
 push-streaming transport. Files and Git stage use Pierre Trees/Diffs with actual
 repository data; use refresh after agent edits. Ask Codex to stage and commit.
 
+Use the trash button beside a thread to delete it and destroy its sandbox,
+including uncommitted files and saved agent logins. Confirmation is required.
+Cleanup must succeed before thread metadata is removed; failed cleanup can be
+retried. Pushed GitHub branches are not deleted.
+
 **Experimental: sandbox disk and agent login state are ephemeral.** After 30 minutes
 idle or a container restart they can be lost; saved thread metadata is not a backup.
 No R2 checkpoints or publish operation yet. Clone credentials are short-lived and
@@ -44,6 +49,12 @@ between threads. Reconnecting a surviving sandbox reloads the saved ACP session;
 a failed load is reported rather than silently starting a new conversation.
 Approvals require an explicit choice; Stop cancels the current turn. Signing out
 of Codex does not delete the conversation. This is separate from GitHub sign-out.
+
+Mode, model, reasoning effort and fast-mode selectors appear only when advertised
+by the adapter. They cannot change during a running turn. Model changes refresh
+the supported choices. Fast mode may increase usage; it is not a generic speed dial.
+Context usage is the last Codex-reported estimate, not billing or subscription
+quota. Agent-emitted thinking text is collapsed separately from the final answer.
 
 ## Development
 

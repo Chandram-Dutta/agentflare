@@ -1,6 +1,6 @@
 export type AcpMessage = {
   id: string;
-  role: "user" | "assistant" | "tool";
+  role: "user" | "assistant" | "thought" | "tool";
   text: string;
   status?: string;
 };
@@ -12,6 +12,7 @@ export type AcpSnapshot = {
     | "auth-required"
     | "authenticating"
     | "ready"
+    | "configuring"
     | "running"
     | "error";
   messages: AcpMessage[];
@@ -23,12 +24,22 @@ export type AcpSnapshot = {
     title: string;
     options: { optionId: string; name: string; kind: string }[];
   }[];
+  configOptions?: {
+    id: string;
+    name: string;
+    description?: string;
+    category?: string;
+    currentValue: string;
+    options: { value: string; name: string; description?: string }[];
+  }[];
+  contextUsage?: { used: number; size: number };
 };
 
 export type AcpAction =
   | { type: "connect" }
   | { type: "authenticate" }
   | { type: "prompt"; text: string; requestId: string }
+  | { type: "set-config"; configId: string; value: string }
   | { type: "cancel" }
   | { type: "permission"; id: string; optionId: string }
   | { type: "login-response"; id: string; action: "accept" | "cancel" }

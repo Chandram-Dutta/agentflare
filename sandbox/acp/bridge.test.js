@@ -114,3 +114,76 @@ test("large output is bounded and truncation is reported", async () =>
     ).toBeLessThanOrEqual(128000);
     expect(b.snapshot.messages.at(-1).text.length).toBe(64000);
   }));
+
+test("new and loaded sessions expose runtime config without boolean capability", async () =>
+  fixture(async (start, cwd) => {
+    await writeFile(join(cwd, "authenticated"), "synthetic");
+    const first = start();
+    await first.ready;
+    expect(first.snapshot.configOptions.map((option) => option.id)).toEqual([
+      "mode", "model", "reasoning_effort", "fast-mode",
+    ]);
+    expect(first.snapshot.configOptions[0].options.map((option) => option.value)).toEqual([
+      "read-only", "workspace-write", "agent", "agent-full-access",
+    ]);
+    await first.close();
+    const loaded = start();
+    await loaded.ready;
+    expect(loaded.snapshot.configOptions.find((option) => option.id === "model")?.currentValue).toBe("small");
+  }));
+
+test("model changes replace options, clear usage, and serialize prompts", async () =>
+  fixture(async (start, cwd) => {
+    await writeFile(join(cwd, "authenticated"), "synthetic");
+    const b = start();
+    await b.ready;
+    await b.act({ type: "prompt", text: "telemetry", requestId: "usage" });
+    await until(() => b.snapshot.status === "ready");
+    expect(b.snapshot.contextUsage).toEqual({ used: 13, size: 101 });
+    const changing = b.act({ type: "set-config", configId: "model", value: "large" });
+    expect(b.snapshot.status).toBe("configuring");
+    await expect(b.act({ type: "prompt", text: "race", requestId: "race" })).rejects.toThrow();
+    await expect(b.act({ type: "set-config", configId: "model", value: "small" })).rejects.toThrow();
+    await changing;
+    expect(b.snapshot.contextUsage).toBeUndefined();
+    expect(b.snapshot.configOptions.map((option) => option.id)).toEqual(["model", "reasoning_effort"]);
+    expect(b.snapshot.configOptions[1].options.map((option) => option.value)).toEqual(["medium"]);
+  }));
+
+test("agent death during configuration cannot restore ready state", async () =>
+  fixture(async (start, cwd) => {
+    await writeFile(join(cwd, "authenticated"), "synthetic");
+    const b = start(["crash-config"]);
+    await b.ready;
+    await expect(b.act({ type: "set-config", configId: "model", value: "large" })).rejects.toThrow();
+    expect(b.snapshot.status).toBe("error");
+    await expect(b.act({ type: "prompt", text: "inspect", requestId: "after-crash" })).rejects.toThrow();
+  }));
+
+test("invented config choices are rejected without mutating state", async () =>
+  fixture(async (start, cwd) => {
+    await writeFile(join(cwd, "authenticated"), "synthetic");
+    const b = start();
+    await b.ready;
+    const before = JSON.stringify(b.snapshot.configOptions);
+    await expect(b.act({ type: "set-config", configId: "invented", value: "x" })).rejects.toThrow();
+    await expect(b.act({ type: "set-config", configId: "model", value: "invented" })).rejects.toThrow();
+    expect(JSON.stringify(b.snapshot.configOptions)).toBe(before);
+    expect(b.snapshot.status).toBe("ready");
+  }));
+
+test("config updates replace the list and thought chunks stay separate from answers", async () =>
+  fixture(async (start, cwd) => {
+    await writeFile(join(cwd, "authenticated"), "synthetic");
+    const b = start();
+    await b.ready;
+    await b.act({ type: "prompt", text: "telemetry", requestId: "telemetry" });
+    await until(() => b.snapshot.status === "ready");
+    expect(b.snapshot.messages.slice(-2).map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: "thought", text: "explicit thought" },
+      { role: "assistant", text: "visible answer" },
+    ]);
+    await b.act({ type: "prompt", text: "config-event", requestId: "event" });
+    await until(() => b.snapshot.status === "ready");
+    expect(b.snapshot.configOptions.map((option) => option.id)).toEqual(["collaboration_mode"]);
+  }));

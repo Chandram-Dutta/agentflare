@@ -11,7 +11,12 @@ export function createBridge({
   cwd = "/workspace/repo",
   sessionFile = "/workspace/.agentflare/acp-session",
 } = {}) {
-  const snapshot = { status: "connecting", messages: [], permissions: [] };
+  const snapshot = {
+    status: "connecting",
+    messages: [],
+    permissions: [],
+    configOptions: [],
+  };
   const permissions = new Map();
   const elicitations = new Map();
   const promptIds = new Set();
@@ -72,13 +77,73 @@ export function createBridge({
       snapshot.truncated = true;
     }
   }
+  function normalizeConfigOptions(configOptions, modes) {
+    const source = Array.isArray(configOptions) ? configOptions : [];
+    const normalized = source.flatMap((option) => {
+      if (
+        option?.type !== "select" ||
+        typeof option.id !== "string" ||
+        typeof option.name !== "string" ||
+        typeof option.currentValue !== "string" ||
+        !Array.isArray(option.options)
+      )
+        return [];
+      const choices = option.options.flatMap((entry) =>
+        Array.isArray(entry?.options) ? entry.options : [entry],
+      );
+      const options = choices.flatMap((choice) =>
+        typeof choice?.value === "string" && typeof choice.name === "string"
+          ? [{
+              value: choice.value,
+              name: choice.name,
+              ...(typeof choice.description === "string"
+                ? { description: choice.description }
+                : {}),
+            }]
+          : [],
+      );
+      if (!options.some((choice) => choice.value === option.currentValue))
+        return [];
+      return [{
+        id: option.id,
+        name: option.name,
+        ...(typeof option.description === "string"
+          ? { description: option.description }
+          : {}),
+        ...(typeof option.category === "string"
+          ? { category: option.category }
+          : {}),
+        currentValue: option.currentValue,
+        options,
+      }];
+    });
+    if (normalized.some((option) => option.id === "mode") || !modes)
+      return normalized;
+    if (
+      typeof modes.currentModeId !== "string" ||
+      !Array.isArray(modes.availableModes)
+    )
+      return normalized;
+    const options = modes.availableModes.flatMap((mode) =>
+      typeof mode?.id === "string" && typeof mode.name === "string"
+        ? [{ value: mode.id, name: mode.name,
+            ...(typeof mode.description === "string" ? { description: mode.description } : {}) }]
+        : [],
+    );
+    return options.some((choice) => choice.value === modes.currentModeId)
+      ? [{ id: "mode", name: "Mode", category: "mode", currentValue: modes.currentModeId, options }, ...normalized]
+      : normalized;
+  }
   function update({ update: u }) {
     if (
       u.sessionUpdate === "agent_message_chunk" ||
-      u.sessionUpdate === "user_message_chunk"
+      u.sessionUpdate === "user_message_chunk" ||
+      u.sessionUpdate === "agent_thought_chunk"
     ) {
       const role =
-        u.sessionUpdate === "agent_message_chunk" ? "assistant" : "user";
+        u.sessionUpdate === "agent_message_chunk"
+          ? "assistant"
+          : u.sessionUpdate === "agent_thought_chunk" ? "thought" : "user";
       if (u.content?.type !== "text") return;
       const last = snapshot.messages.at(-1);
       if (last && last.id === currentMessage && last.role === role) {
@@ -89,6 +154,24 @@ export function createBridge({
         currentMessage = crypto.randomUUID();
         append(role, u.content.text, currentMessage);
       }
+    } else if (u.sessionUpdate === "config_option_update") {
+      const previousModel = snapshot.configOptions.find(
+        (option) => option.id === "model" || option.category === "model",
+      )?.currentValue;
+      snapshot.configOptions = normalizeConfigOptions(u.configOptions);
+      const nextModel = snapshot.configOptions.find(
+        (option) => option.id === "model" || option.category === "model",
+      )?.currentValue;
+      if (previousModel !== nextModel) delete snapshot.contextUsage;
+    } else if (u.sessionUpdate === "current_mode_update") {
+      const mode = snapshot.configOptions.find((option) => option.id === "mode");
+      if (mode?.options.some((choice) => choice.value === u.currentModeId))
+        mode.currentValue = u.currentModeId;
+    } else if (u.sessionUpdate === "usage_update") {
+      if (
+        Number.isFinite(u.used) && u.used >= 0 &&
+        Number.isFinite(u.size) && u.size > 0
+      ) snapshot.contextUsage = { used: u.used, size: u.size };
     } else if (
       u.sessionUpdate === "tool_call" ||
       u.sessionUpdate === "tool_call_update"
@@ -204,18 +287,20 @@ export function createBridge({
         throw new Error("Cannot resume");
       // History is replayed by ACP. Do not append it to the old transcript.
       snapshot.messages = [];
-      await agent.request(methods.agent.session.load, {
+      const result = await agent.request(methods.agent.session.load, {
         sessionId: saved,
         cwd,
         mcpServers: [],
       });
       sessionId = saved;
+      snapshot.configOptions = normalizeConfigOptions(result.configOptions, result.modes);
     } else {
       const result = await agent.request(methods.agent.session.new, {
         cwd,
         mcpServers: [],
       });
       sessionId = result.sessionId;
+      snapshot.configOptions = normalizeConfigOptions(result.configOptions, result.modes);
       await mkdir(dirname(sessionFile), { recursive: true, mode: 0o700 });
       await writeFile(`${sessionFile}.tmp`, sessionId, { mode: 0o600 });
       await rename(`${sessionFile}.tmp`, sessionFile);
@@ -308,6 +393,27 @@ export function createBridge({
           if (!dead) snapshot.status = "ready";
         })
         .catch(fail);
+    } else if (action.type === "set-config") {
+      if (snapshot.status !== "ready")
+        throw new Error("Cannot change configuration while busy");
+      const option = snapshot.configOptions.find((item) => item.id === action.configId);
+      if (!option || !option.options.some((item) => item.value === action.value))
+        throw new Error("Configuration option or value is unavailable");
+      snapshot.status = "configuring";
+      try {
+        const result = await agent.request(methods.agent.session.setConfigOption, {
+          sessionId,
+          configId: action.configId,
+          value: action.value,
+        });
+        snapshot.configOptions = normalizeConfigOptions(result.configOptions);
+        if (option.id === "model" || option.category === "model")
+          delete snapshot.contextUsage;
+        if (!dead) snapshot.status = "ready";
+      } catch (error) {
+        if (!dead) snapshot.status = "ready";
+        throw error;
+      }
     } else if (action.type === "cancel") {
       if (snapshot.status !== "running") return;
       settlePending();

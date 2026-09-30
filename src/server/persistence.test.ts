@@ -228,6 +228,80 @@ async function createProject(user = "alice"): Promise<Project> {
   return response.json();
 }
 
+test("thread deletion checks ownership/origin and waits for sandbox cleanup before removing metadata", async () => {
+  const project = await createProject();
+  const created = (await (
+    await request(`/projects/${project.id}/threads`, "POST", {
+      name: "disposable",
+      agent: "codex",
+    })
+  ).json()) as Thread;
+  let calls = 0;
+  let fail = true;
+  let release!: () => void;
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const cleanup = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  env.Sandboxes = {
+    idFromName(id: string) {
+      expect(id).toBe(created.id);
+      return id;
+    },
+    get() {
+      return {
+        async deleteWorkspace() {
+          calls++;
+          if (fail) throw new Error("cleanup failed");
+          entered();
+          await cleanup;
+        },
+      };
+    },
+  } as unknown as NonNullable<Bindings["Sandboxes"]>;
+  try {
+    expect(
+      (await request(`/threads/${created.id}`, "DELETE", undefined, "bob"))
+        .status,
+    ).toBe(404);
+    expect(
+      (
+        await request(`/threads/${created.id}`, "DELETE", undefined, "alice", {
+          origin: "https://evil.test",
+        })
+      ).status,
+    ).toBe(403);
+    expect(calls).toBe(0);
+    expect((await request(`/threads/${created.id}`, "DELETE")).status).toBe(
+      502,
+    );
+    expect(
+      ((await (await request("/workspace")).json()) as WorkspaceData).threads,
+    ).toHaveLength(1);
+    fail = false;
+    const deleting = request(`/threads/${created.id}`, "DELETE");
+    await enteredPromise;
+    expect(
+      ((await (await request("/workspace")).json()) as WorkspaceData).threads,
+    ).toHaveLength(1);
+    release();
+    expect((await deleting).status).toBe(200);
+    expect(
+      ((await (await request("/workspace")).json()) as WorkspaceData).threads,
+    ).toHaveLength(0);
+    expect((await request(`/threads/${created.id}`, "DELETE")).status).toBe(
+      404,
+    );
+    expect(calls).toBe(2);
+  } finally {
+    release();
+    delete env.Sandboxes;
+  }
+});
+
 async function createThread(
   projectId: string,
   user = "alice",

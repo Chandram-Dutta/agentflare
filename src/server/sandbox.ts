@@ -18,11 +18,22 @@ export class ThreadSandbox extends Sandbox {
   sleepAfter = "30m";
 
   async workspaceStatus(): Promise<RuntimeState> {
+    if (await this.ctx.storage.get("app:deleted"))
+      throw new Error("This thread's sandbox has been deleted.");
     return (
       (await this.ctx.storage.get<RuntimeState>("workspace")) ?? {
         started: false,
       }
     );
+  }
+
+  async deleteWorkspace(): Promise<void> {
+    // Fence future application operations before waiting for existing startup.
+    // The SDK's destroy() preserves this application-owned tombstone.
+    await this.ctx.storage.put("app:deleted", true);
+    await Promise.allSettled([this.starting, this.startingAcp]);
+    await this.destroy();
+    await this.ctx.storage.delete("workspace");
   }
 
   async startWorkspace(input: StartInput): Promise<RuntimeState> {
@@ -185,15 +196,25 @@ export class ThreadSandbox extends Sandbox {
         } catch {}
         await this.killProcess("agentflare-acp").catch(() => {});
       }
+      const image = await this.exec("test -r /opt/agentflare/acp/bridge.mjs");
+      if (!image.success)
+        throw new Error(
+          "This sandbox is using an older image without Codex ACP. Start a new thread.",
+        );
       await this.startProcess("bun /opt/agentflare/acp/bridge.mjs", {
         processId: "agentflare-acp",
         autoCleanup: false,
       });
-      for (let attempt = 0; attempt < 30; attempt++) {
+      for (let attempt = 0; attempt < 60; attempt++) {
         try {
           return await this.fetchAcp("GET");
         } catch {}
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        const process = await this.getProcess("agentflare-acp");
+        if (process && !["starting", "running"].includes(process.status))
+          throw new Error(
+            "The Codex bridge exited during startup. Check the container logs.",
+          );
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
       throw new Error("Codex bridge did not become ready.");
     })();

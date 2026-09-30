@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { ThemeProvider, useTheme } from "next-themes";
-import { Moon, Plus, Sun } from "lucide-react";
+import { Moon, Plus, Sun, Trash2 } from "lucide-react";
 import {
   Group,
   Panel,
@@ -11,6 +11,13 @@ import {
 } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { RuntimeWorkspace } from "@/components/runtime-workspace";
 import { ProjectSettings } from "@/components/project-settings";
@@ -308,6 +315,15 @@ function SavedWorkspace() {
             threads={data.threads.filter((t) => t.projectId === project.id)}
             onProjectSave={savedProject}
             onThreadSave={savedThread}
+            onThreadDelete={(id) =>
+              setData(
+                (current) =>
+                  current && {
+                    ...current,
+                    threads: current.threads.filter((t) => t.id !== id),
+                  },
+              )
+            }
           />
         </TabsContent>
       ))}
@@ -321,14 +337,17 @@ function ProjectWorkspace({
   threads,
   onProjectSave,
   onThreadSave,
+  onThreadDelete,
 }: {
   project: Project;
   active: boolean;
   threads: Thread[];
   onProjectSave: (project: Project) => void;
   onThreadSave: (thread: Thread) => void;
+  onThreadDelete: (id: string) => void;
 }) {
   const [selected, setSelected] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Thread>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const thread = threads.find((item) => item.id === selected) ?? threads[0];
@@ -357,10 +376,64 @@ function ProjectWorkspace({
     }
   }
 
+  async function deleteThread() {
+    if (!deleteTarget || pending) return;
+    setPending(true);
+    setError("");
+    try {
+      await apiRequest(`/threads/${deleteTarget.id}`, "DELETE");
+      onThreadDelete(deleteTarget.id);
+      setDeleteTarget(undefined);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Deletion failed.");
+    } finally {
+      setPending(false);
+    }
+  }
+
   if (!active) return null;
 
   return (
     <div className="min-w-0 flex-1 overflow-x-auto">
+      <Dialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => {
+          if (!open && !pending) {
+            setDeleteTarget(undefined);
+            setError("");
+          }
+        }}
+      >
+        <DialogContent showCloseButton={!pending}>
+          <DialogTitle>Delete {deleteTarget?.name}?</DialogTitle>
+          <DialogDescription>
+            This permanently deletes the thread and destroys its sandbox,
+            including uncommitted files and saved agent logins. Pushed GitHub
+            branches are not deleted.
+          </DialogDescription>
+          {error && (
+            <p role="alert" className="text-xs text-destructive">
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={pending}
+              onClick={() => setDeleteTarget(undefined)}
+            >
+              cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={pending}
+              onClick={deleteThread}
+            >
+              {pending ? "deleting sandbox…" : "delete thread and sandbox"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Group
         orientation="horizontal"
         defaultLayout={layout.defaultLayout}
@@ -392,18 +465,31 @@ function ProjectWorkspace({
               className="flex min-h-0 flex-col gap-1 overflow-auto p-2"
             >
               {threads.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  aria-current={item.id === thread?.id ? "true" : undefined}
-                  onClick={() => setSelected(item.id)}
-                  className={`min-w-32 border-l-2 px-3 py-2 text-left text-xs outline-offset-2 focus-visible:outline-primary lg:min-w-0 ${item.id === thread?.id ? "border-primary bg-[var(--terminal)]" : "border-transparent text-muted-foreground hover:bg-[var(--terminal)]"}`}
-                >
-                  <span className="block truncate">{item.name}</span>
-                  <span className="mt-1 block text-[10px] text-muted-foreground">
-                    {agents[item.agent].name}
-                  </span>
-                </button>
+                <div key={item.id} className="flex min-w-0 items-center">
+                  <button
+                    type="button"
+                    aria-current={item.id === thread?.id ? "true" : undefined}
+                    onClick={() => setSelected(item.id)}
+                    className={`min-w-0 flex-1 border-l-2 px-3 py-2 text-left text-xs outline-offset-2 focus-visible:outline-primary ${item.id === thread?.id ? "border-primary bg-[var(--terminal)]" : "border-transparent text-muted-foreground hover:bg-[var(--terminal)]"}`}
+                  >
+                    <span className="block truncate">{item.name}</span>
+                    <span className="mt-1 block text-[10px] text-muted-foreground">
+                      {agents[item.agent].name}
+                    </span>
+                  </button>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    disabled={pending}
+                    aria-label={`Delete thread ${item.name}`}
+                    onClick={() => {
+                      setError("");
+                      setDeleteTarget(item);
+                    }}
+                  >
+                    <Trash2 className="size-3" />
+                  </Button>
+                </div>
               ))}
             </nav>
             {error && (
