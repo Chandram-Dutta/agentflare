@@ -8,7 +8,6 @@ const origin = "https://agentflare.onlychan.xyz";
 test("resolves repository paths and locations", () => {
   for (const href of [
     `${root}/README.md`,
-    "/workspace/repo/README.md",
     "README.md",
     "./README.md",
     `${origin}${root}/README.md`,
@@ -43,6 +42,7 @@ test("rejects web/application links, traversal, and cross-thread paths", () => {
     "#heading",
     "README.md#heading",
     "/workspace/threads/another-thread/repo/README.md",
+    "/workspace/repo/README.md",
     `${root}/../secret`,
     `${root}/%2e%2e/secret`,
     "../secret",

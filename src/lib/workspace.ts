@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 export const agents = {
-  claude: { name: "Claude Code", command: "claude", description: "Anthropic" },
   codex: { name: "Codex", command: "codex", description: "OpenAI" },
 } as const;
 
@@ -18,11 +17,6 @@ const repository = z
   )
   .transform((value) => value.replace(/\/$/, "").replace(/\.git$/, ""));
 
-export const workspaceConfig = z.strictObject({
-  repository,
-  agent: z.enum(["claude", "codex"]),
-});
-
 export const projectInput = z.strictObject({
   name: z.string().trim().min(1).max(40),
   repository,
@@ -30,7 +24,7 @@ export const projectInput = z.strictObject({
 
 export const threadInput = z.strictObject({
   name: z.string().trim().min(1).max(60),
-  agent: z.enum(["claude", "codex"]),
+  agent: z.literal("codex"),
 });
 
 export const projectUpdate = projectInput.extend({
@@ -47,7 +41,7 @@ export type Project = z.infer<typeof projectInput> & {
 };
 export type Thread = z.infer<typeof threadInput> & {
   id: string;
-  runtime?: "thread" | "user";
+  runtime: "user";
   projectId: string;
   version: number;
   createdAt: number;

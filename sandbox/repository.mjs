@@ -209,10 +209,11 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
+  if (!process.argv[3]) throw Error("Repository root is required");
   process.stdout.write(
     JSON.stringify(
       inspectRepository(
-        process.argv[3] ?? "/workspace/repo",
+        process.argv[3],
         JSON.parse(Buffer.from(process.argv[2], "base64").toString()),
       ),
     ),

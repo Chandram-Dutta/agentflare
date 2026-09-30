@@ -6,7 +6,7 @@ export { ThreadSandbox } from "./server/sandbox";
 
 const worker = {
   fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
-    // Return WebSocket upgrades directly; do not pass them through an RSC route.
+    // API requests bypass the RSC handler.
     if (new URL(request.url).pathname.startsWith("/api/"))
       return api.fetch(request, env, ctx);
     return app.fetch(request, env, ctx);

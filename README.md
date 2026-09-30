@@ -12,7 +12,7 @@ A persistent, authenticated workspace with an initial Cloudflare Sandbox runtime
 - GitHub sign-in through Better Auth; closed-by-default GitHub account allowlist.
 - D1/Drizzle projects and threads, private to their owner and saved across reloads.
 - Project tabs, per-project threads, a Codex conversation and a Files/Git stage inspector.
-- Monospace light/dark workspace; existing Claude threads retain their legacy terminal.
+- Monospace light/dark workspace with Codex conversation UI; no browser terminal.
 - Server-side ownership checks, exact-origin write protection and stale-edit detection.
 
 Each started thread checks user and GitHub App repository access and gets its own
@@ -45,8 +45,7 @@ and 4 MiB of changed blob content relative to the starting base. Workflow permis
 restrictions and repository branch rules can still reject publication.
 
 Use the trash button beside a thread to delete its checkout and uncommitted files.
-For shared Codex threads this keeps the user's login and other threads. Legacy
-threads still destroy their individual sandbox and login. Confirmation is required.
+This keeps the user's login and other threads. Confirmation is required.
 Cleanup must succeed before thread metadata is removed; failed cleanup can be
 retried. Pushed GitHub branches are not deleted.
 
@@ -61,19 +60,27 @@ not permission to silently start a different conversation.
 
 The bridge requests a checkpoint after a turn settles and every 30 seconds while
 alive, including when the browser is closed. Conversation snapshots can save
-during a turn; workspace archives wait until **all of the user's threads are idle**.
+during a turn; workspace archives wait until **all of the user's threads are idle
+and no browser has accessed the runtime for 30 seconds**. Visible conversation and
+repository polling renew that presence lease across all of the user's projects.
+This avoids stopping Codex and blocking interactive requests between messages.
+After closing or backgrounding every workspace tab, the next checkpoint tick can
+save the files. File changes remain pending while the workspace is actively open;
+this is an idle-save policy, not a non-blocking live filesystem snapshot. Returning
+while an archive is already in progress can still wait for that archive to finish.
 The bridge stops its managed Codex processes before archiving the whole
 `/workspace`: per-thread repositories (including `.git`, staging, untracked and
 ignored files) and shared native session state. Credentials in `.codex/auth.json`
-are excluded and remain in the separate encrypted auth store. Initial checkouts
-and controlled idle shutdowns also attempt checkpoints. Failed uploads preserve
+are excluded and remain in the separate encrypted auth store. Checkout and deletion
+requests follow the same presence rule; controlled idle shutdown performs a final
+checkpoint under the shutdown fence. Failed uploads preserve
 the last successful archive; the UI reports pending or failed saves.
 
 **This is checkpoint recovery, not process recovery.** A forced container loss
 can lose work since the last successful checkpoint. Saved chat can be newer than
 restorable files. Background servers and externally detached processes are not
 resumed; avoid relying on their in-flight writes during a checkpoint. Files outside
-`/workspace` are not saved. Legacy per-thread Claude sandboxes remain ephemeral.
+`/workspace` are not saved.
 Without the R2 configuration below, the UI says workspace saving is disabled.
 
 Deleting a thread removes its saved transcript and checkout; durable deletion
@@ -261,8 +268,11 @@ GitHub, provision Cloudflare resources or add a development authentication bypas
 
 The application owns identity, repository access, provisioning and code review.
 For Codex it renders structured ACP messages and explicit permission choices;
-the adapter and Codex own model/tool execution and native authentication. The
-legacy terminal path remains only for existing Claude threads.
+the adapter and Codex own model/tool execution and native authentication.
+Only shared per-user Codex runtimes are supported. Retired per-thread runtime
+records are excluded from the API, not silently reopened in a different sandbox.
+Historical database migrations and records are retained; this cleanup does not
+delete old production containers or their data.
 
 ACP conversations preserve ordered text, image, audio, embedded-resource, and
 resource-link blocks in messages and tool output. Agents advertise prompt media
@@ -290,36 +300,6 @@ installs its own pinned ACP dependencies from `sandbox/acp/package-lock.json`.
 These tests do not establish real subscription entitlement or live Cloudflare
 container connectivity; those need an authenticated end-to-end smoke check.
 
-For a Docker-backed runtime smoke check, run this **local-only** fixture (never
-deploy it):
-
-```sh
-bunx wrangler dev --config scripts/runtime-smoke/wrangler.jsonc --port 3900
-curl http://localhost:3900/prepare
-```
-
-It clones a synthetic local repository and issues concurrent starts against one
-Durable Object. `/terminal` upgrades to the native Codex PTY, `/pid` reports its
-process, and `/destroy` removes this disposable sandbox. No GitHub/agent tokens
-are needed. Run only one dev server on memory-constrained machines. Some nested
-sandboxes lack the kernel socket/TPROXY modules required by Wrangler's network
-proxy: Docker builds and ordinary containers can work while the full local
-Containers runtime cannot. In that case the deployment must be smoke-tested on
-Cloudflare; do not treat unit tests as proof of the live PTY path.
-
-To check resize signaling without Wrangler's network proxy:
-
-```sh
-docker build -t agentflare-resize:local .
-docker run --rm -v "$PWD/scripts/runtime-smoke/pty-resize.ts:/tmp/pty-resize.ts:ro" \
-  --entrypoint bun agentflare-resize:local /tmp/pty-resize.ts
-```
-
-This checks shrink/grow notifications, exact terminal geometry, and subsequent
-input using the image's Bun and agent launcher. The launcher acquires a controlling
-terminal so the SDK's pre-created PTY delivers SIGWINCH to the CLI. This is a
-local process-level regression check, not a live Cloudflare or agent UI test.
-
 Still needed: per-user runtime/storage budgets and process-level recovery UX.
 
 **Publishing must be enforced at the credential boundary.** A confirmation button
@@ -330,7 +310,7 @@ for scoped repository credentials.
 
 Sandbox disk is ephemeral. Checkpoint files and supported agent session state;
 never promise process-memory recovery or preservation beyond the last checkpoint.
-Do not expose terminal, preview, clone or execution endpoints until their resource
+Do not expose preview, clone or execution endpoints until their resource
 authorization is enforced. R2 restoration recovers only the last successful save.
 Local and production D1 bindings are separate. No deployment command runs during
 setup/tests.

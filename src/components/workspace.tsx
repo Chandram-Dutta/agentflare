@@ -20,7 +20,6 @@ import {
   FolderGit2,
   LogOut,
   MessageSquare,
-  Terminal,
 } from "lucide-react";
 import {
   Group,
@@ -50,7 +49,6 @@ import type { Viewer } from "@/server/auth";
 import { apiRequest } from "@/lib/api-client";
 import {
   agents,
-  type AgentId,
   type Project,
   type Thread,
   type WorkspaceData,
@@ -593,20 +591,17 @@ function ProjectWorkspace({
             if (hiddenPanes.includes("viewer")) togglePane("viewer");
           }}
         >
-          {(started) =>
-            thread ? (
-              <ThreadControls
-                key={`${thread.id}:${thread.version}`}
-                thread={thread}
-                onSave={onThreadSave}
-                started={started}
-              />
-            ) : (
-              <div className="h-10 border-b px-3 py-3 text-xs">
-                agent conversation
-              </div>
-            )
-          }
+          {thread ? (
+            <ThreadControls
+              key={`${thread.id}:${thread.version}`}
+              thread={thread}
+              onSave={onThreadSave}
+            />
+          ) : (
+            <div className="h-10 border-b px-3 py-3 text-xs">
+              agent conversation
+            </div>
+          )}
         </RuntimeWorkspace>
       </Group>
     </div>
@@ -616,17 +611,14 @@ function ProjectWorkspace({
 function ThreadControls({
   thread,
   onSave,
-  started,
 }: {
   thread: Thread;
   onSave: (thread: Thread) => void;
-  started: boolean;
 }) {
   const [name, setName] = useState(thread.name);
-  const [agent, setAgent] = useState<AgentId>(thread.agent);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  const dirty = name !== thread.name || agent !== thread.agent;
+  const dirty = name !== thread.name;
   async function save(event: FormEvent) {
     event.preventDefault();
     setPending(true);
@@ -635,7 +627,7 @@ function ThreadControls({
       onSave(
         await apiRequest<Thread>(`/threads/${thread.id}`, "PATCH", {
           name,
-          agent,
+          agent: "codex",
           version: thread.version,
         }),
       );
@@ -654,15 +646,8 @@ function ThreadControls({
         className="flex min-h-10 flex-wrap items-center justify-between gap-2 px-3 py-1"
       >
         <div className="flex min-w-0 basis-full items-center gap-2 sm:flex-1 sm:basis-auto">
-          <span
-            className="shrink-0 text-muted-foreground"
-            title={thread.agent === "codex" ? "Conversation" : "Terminal"}
-          >
-            {thread.agent === "codex" ? (
-              <MessageSquare className="size-3.5" aria-hidden="true" />
-            ) : (
-              <Terminal className="size-3.5" aria-hidden="true" />
-            )}
+          <span className="shrink-0 text-muted-foreground" title="Conversation">
+            <MessageSquare className="size-3.5" aria-hidden="true" />
           </span>
           <Input
             aria-label="Thread name"
@@ -674,20 +659,6 @@ function ThreadControls({
             className="workspace-input h-7! min-w-0 max-w-52 border-transparent px-1"
           />
         </div>
-        {!started && (
-          <select
-            aria-label="Thread agent"
-            value={agent}
-            disabled={pending || started}
-            onChange={(event) => setAgent(event.target.value as AgentId)}
-            className="h-7 max-w-full border bg-background px-2 text-xs outline-offset-2 focus-visible:outline-primary"
-          >
-            {thread.agent === "claude" && (
-              <option value="claude">{agents.claude.name}</option>
-            )}
-            <option value="codex">{agents.codex.name}</option>
-          </select>
-        )}
         {dirty && (
           <Button
             type="submit"

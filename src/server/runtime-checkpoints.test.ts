@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { Sandbox } from "@cloudflare/sandbox";
 import type { DurableObjectStorage } from "@cloudflare/workers-types";
 import type { Bindings } from "./env";
@@ -275,7 +275,7 @@ describe("durable runtime checkpoints", () => {
     await f.runtime.prepareSleep();
     await f.runtime.delete(a);
     expect(await f.runtime.checkpoint("callback-token")).toEqual({
-      saved: true,
+      saved: false,
     });
     f.sandbox.dirs.clear();
     f.sandbox.files.clear();
@@ -315,8 +315,68 @@ describe("durable runtime checkpoints", () => {
     expect(f.sandbox.backupCount).toBe(0);
     release();
     await prompt;
-    expect(await checkpoint).toEqual({ saved: true });
-    expect(f.sandbox.backupCount).toBe(1);
+    expect(await checkpoint).toEqual({ saved: false });
+    expect(f.sandbox.backupCount).toBe(0);
+  });
+
+  test("active browsers save transcripts without quiescing; archive starts at the idle boundary", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(100_000);
+    try {
+      const f = fixture();
+      seed(f, a);
+      await f.runtime.acp(a);
+      f.sandbox.sessions[a] = { status: "ready" };
+      f.sandbox.snapshots.set(a, {
+        status: "ready",
+        permissions: [],
+        messages: [{ id: "answer", role: "assistant", text: "Completed work" }],
+      });
+      const token = f.storage.records.get("auth-capability") as string;
+      clock.mockReturnValue(129_999);
+      // A re-created DO must retain the presence lease.
+      const restarted = fixture("owner-one", f).runtime;
+      expect(await restarted.checkpoint(token)).toEqual({ saved: false });
+      expect((await restarted.userSaved(a)).messages[0].text).toBe(
+        "Completed work",
+      );
+      expect(f.sandbox.log.some((x) => x.endsWith("/quiesce"))).toBe(false);
+      expect(f.sandbox.backupCount).toBe(0);
+      clock.mockReturnValue(130_000);
+      expect(await restarted.checkpoint(token)).toEqual({ saved: true });
+      expect(f.sandbox.backupCount).toBe(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test("repository polling from a sibling renews presence; a busy agent still defers after expiry", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(100_000);
+    try {
+      const f = fixture();
+      seed(f, a);
+      seed(f, b);
+      await f.runtime.acp(a);
+      const token = f.storage.records.get("auth-capability") as string;
+      // The repository fixture returns JSON for inspection, not a shell result.
+      const exec = f.sandbox.exec.bind(f.sandbox);
+      f.sandbox.exec = async (command) =>
+        command.startsWith("node /opt/agentflare/repository.mjs")
+          ? { success: true, stdout: '{"files":[]}' }
+          : exec(command);
+      clock.mockReturnValue(125_000);
+      await f.runtime.inspect(b, "files");
+      clock.mockReturnValue(130_000);
+      expect(await f.runtime.checkpoint(token)).toEqual({ saved: false });
+      clock.mockReturnValue(155_000);
+      f.sandbox.sessions[a] = { status: "running" };
+      expect(await f.runtime.checkpoint(token)).toEqual({ saved: false });
+      expect(f.sandbox.backupCount).toBe(0);
+      f.sandbox.sessions[a] = { status: "ready" };
+      expect(await f.runtime.checkpoint(token)).toEqual({ saved: true });
+      expect(f.sandbox.backupCount).toBe(1);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   test("backup includes ignored/staged/untracked workspace state, excludes auth, and disables gitignore", async () => {

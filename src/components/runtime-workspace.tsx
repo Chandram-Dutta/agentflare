@@ -15,7 +15,6 @@ import { RefreshCw, Files, FileDiff, GitBranch } from "lucide-react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { File, PatchDiff } from "@pierre/diffs/react";
 import { AcpConversation } from "./acp-conversation";
-import { TerminalPreview } from "./terminal-preview";
 import { Button } from "./ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { PublishChanges } from "./publish-changes";
@@ -42,7 +41,7 @@ export function RuntimeWorkspace({
   projectId: string;
   hiddenPanes: string[];
   onShowViewer: () => void;
-  children: (started: boolean) => ReactNode;
+  children: ReactNode;
 }) {
   const store = useThreadStore();
   const {
@@ -83,7 +82,7 @@ export function RuntimeWorkspace({
           aria-label="Thread agent"
         >
           <div className="flex min-h-10 shrink-0 items-center border-b">
-            {children(Boolean(state?.started))}
+            {children}
             <div
               ref={setAgentControls}
               className="flex shrink-0 items-center pr-2"
@@ -95,19 +94,15 @@ export function RuntimeWorkspace({
             </p>
           )}
           {threadId && (state?.started || snapshot?.saved) ? (
-            state?.agent === "codex" || snapshot?.saved ? (
-              <AcpConversation
-                key={threadId}
-                threadId={threadId}
-                headerTarget={agentControls}
-                onOpenFile={(file) => {
-                  inspectorRef.current?.openFile(file);
-                  onShowViewer();
-                }}
-              />
-            ) : (
-              <TerminalPreview threadId={threadId} />
-            )
+            <AcpConversation
+              key={threadId}
+              threadId={threadId}
+              headerTarget={agentControls}
+              onOpenFile={(file) => {
+                inspectorRef.current?.openFile(file);
+                onShowViewer();
+              }}
+            />
           ) : (
             <div className="flex-1 bg-[var(--terminal)] p-6 text-xs">
               <p>

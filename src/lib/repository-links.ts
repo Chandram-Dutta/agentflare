@@ -57,10 +57,9 @@ export function resolveRepositoryLink(
   )
     return null;
 
-  const roots = [`/workspace/threads/${threadId}/repo/`, "/workspace/repo/"];
+  const root = `/workspace/threads/${threadId}/repo/`;
   if (path.startsWith("/")) {
-    const root = roots.find((root) => path.startsWith(root));
-    if (!root) return null;
+    if (!path.startsWith(root)) return null;
     path = path.slice(root.length);
   }
   const segments = path.split("/").filter((segment) => segment !== ".");

@@ -24,6 +24,7 @@ export type UserStart = {
   cloneToken: string;
 };
 const processId = "agentflare-user-acp";
+const interactiveGraceMs = 30_000;
 const backupTtl = 3_153_600_000; // 100 years. The R2 bucket must not expire backups/ via lifecycle rules.
 type Persistence = {
   state: "saved" | "saving" | "error" | "disabled";
@@ -57,6 +58,15 @@ export class UserRuntime {
     const next = this.operations.then(fn, fn);
     this.operations = next.catch(() => {});
     return next;
+  }
+  private async interactive<T>(fn: () => Promise<T>): Promise<T> {
+    // Record presence before queuing so a waiting browser request also defers
+    // a checkpoint. Persist the lease across Durable Object re-instantiation.
+    await this.storage.put(
+      "interactive-until",
+      Date.now() + interactiveGraceMs,
+    );
+    return this.serialized(fn);
   }
   private persistenceConfigured() {
     const env = this.env;
@@ -212,7 +222,7 @@ export class UserRuntime {
       );
   }
   start(id: string, input: UserStart): Promise<RuntimeState> {
-    return this.serialized(() => this.startUnlocked(id, input));
+    return this.interactive(() => this.startUnlocked(id, input));
   }
   private async startUnlocked(
     id: string,
@@ -254,7 +264,7 @@ export class UserRuntime {
       };
       await this.storage.put(`workspace:${id}`, state);
       await this.dirty();
-      // Preserve even the initial checkout before a bridge has been started.
+      // The callback or controlled shutdown captures this once presence expires.
       await this.checkpointUnlocked().catch(() => {});
       return state;
     })();
@@ -266,7 +276,7 @@ export class UserRuntime {
     }
   }
   inspect(id: string, operation: string, path = "", staged = false) {
-    return this.serialized(() =>
+    return this.interactive(() =>
       this.inspectUnlocked(id, operation, path, staged),
     );
   }
@@ -289,7 +299,7 @@ export class UserRuntime {
     return JSON.parse(result.stdout);
   }
   async review(id: string): Promise<BranchReview> {
-    return this.serialized(() => this.reviewUnlocked(id));
+    return this.interactive(() => this.reviewUnlocked(id));
   }
   private async reviewUnlocked(id: string): Promise<BranchReview> {
     const review = await this.inspectUnlocked(id, "review");
@@ -305,7 +315,7 @@ export class UserRuntime {
     id: string,
     input: PublishInput & { branch: string; token: string },
   ): Promise<PublishResult> {
-    return this.serialized(() => this.publishUnlocked(id, input));
+    return this.interactive(() => this.publishUnlocked(id, input));
   }
   private async publishUnlocked(
     id: string,
@@ -333,7 +343,7 @@ export class UserRuntime {
     }
   }
   delete(id: string) {
-    return this.serialized(() => this.deleteUnlocked(id));
+    return this.interactive(() => this.deleteUnlocked(id));
   }
   private async deleteUnlocked(id: string) {
     const root = this.root(id);
@@ -465,7 +475,6 @@ export class UserRuntime {
         autoCleanup: false,
         env: {
           CODEX_HOME: "/workspace/.codex",
-          AGENTFLARE_SHARED_RUNTIME: "1",
           AGENTFLARE_AUTH_CALLBACK: `${this.env.BETTER_AUTH_URL}/api/codex-checkpoint/${this.identity}`,
           ...(this.persistenceConfigured()
             ? {
@@ -495,7 +504,7 @@ export class UserRuntime {
     }
   }
   acp(id: string, action?: AcpAction): Promise<AcpSnapshot> {
-    return this.serialized(() => this.acpUnlocked(id, action));
+    return this.interactive(() => this.acpUnlocked(id, action));
   }
   private async acpUnlocked(
     id: string,
@@ -557,7 +566,7 @@ export class UserRuntime {
 
   prepareSleep(stop?: () => Promise<void>): Promise<boolean> {
     return this.serialized(async () => {
-      if (!(await this.checkpointUnlocked())) return false;
+      if (!(await this.checkpointUnlocked(true))) return false;
       // Keep the fence through shutdown: a prompt accepted between the archive
       // and stopping the container would otherwise be deliberately discarded.
       await stop?.();
@@ -565,16 +574,16 @@ export class UserRuntime {
     });
   }
 
-  private async checkpointUnlocked(): Promise<boolean> {
+  private async checkpointUnlocked(shuttingDown = false): Promise<boolean> {
     try {
-      return await this.captureCheckpoint();
+      return await this.captureCheckpoint(shuttingDown);
     } catch (error) {
       await this.storage.put("checkpoint-error", true);
       throw error;
     }
   }
 
-  private async captureCheckpoint(): Promise<boolean> {
+  private async captureCheckpoint(shuttingDown: boolean): Promise<boolean> {
     if (!this.persistenceConfigured()) return true;
     // An aborted restore must never be backed up as a new complete workspace.
     if (await this.storage.get("restore-pending")) return false;
@@ -617,6 +626,14 @@ export class UserRuntime {
       await this.storage.delete("checkpoint-error");
       return true;
     }
+    // Full archives stop native Codex and upload under the operation fence.
+    // Never initiate that disruptive work between messages in an active UI.
+    // Transcript saves above still run; the callback retries after presence expires.
+    if (
+      !shuttingDown &&
+      Date.now() < ((await this.storage.get<number>("interactive-until")) ?? 0)
+    )
+      return false;
     if (running) {
       // Health 503 is not proof that native writers exited. A failed quiesce
       // must be retried, never bypassed on the next checkpoint attempt.

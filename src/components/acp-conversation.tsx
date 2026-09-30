@@ -7,14 +7,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import {
-  ArrowUp,
-  SquareTerminal,
-  LogOut,
-  Square,
-  RotateCcw,
-  Save,
-} from "lucide-react";
+import { ArrowUp, Bot, LogOut, Square, RotateCcw, Save } from "lucide-react";
 import { createPortal } from "react-dom";
 import { Button } from "./ui/button";
 import { AcpMessages } from "./acp-messages";
@@ -126,7 +119,7 @@ export function AcpConversation({
         title={`Codex: ${status}`}
         className="flex items-center gap-1.5 px-1 text-[10px]"
       >
-        <SquareTerminal className="size-3.5" aria-hidden="true" />
+        <Bot className="size-3.5" aria-hidden="true" />
         <span
           className={`size-1.5 rounded-full ${idle && !networkError ? "bg-emerald-500" : "bg-primary"}`}
           aria-hidden="true"
@@ -137,7 +130,7 @@ export function AcpConversation({
         {persistenceLabel && (
           <span
             className="hidden items-center gap-1 text-[10px] text-muted-foreground sm:flex"
-            title={`Workspace checkpoint: ${persistenceLabel}. ${savedAt ? `Last safe save: ${savedAt}. ` : ""}Pending backups wait for all threads to be idle.`}
+            title={`Workspace checkpoint: ${persistenceLabel}. ${savedAt ? `Last safe save: ${savedAt}. ` : ""}Chat saves while you work. Full workspace backups wait until all turns are idle and no browser has accessed the runtime for 30 seconds. File changes remain pending while you work.`}
           >
             <Save className="size-3" aria-hidden="true" />
             {persistenceLabel}
@@ -160,18 +153,12 @@ export function AcpConversation({
             variant="ghost"
             size="icon-xs"
             aria-label="Sign out of Codex"
-            title={
-              snapshot?.authScope === "user"
-                ? "Sign out of Codex in all shared threads"
-                : "Sign out of Codex"
-            }
+            title="Sign out of Codex in all shared threads"
             disabled={actionPending}
             onClick={() => {
               if (
                 window.confirm(
-                  snapshot?.authScope === "user"
-                    ? "Sign out of Codex across all your shared threads? Stop running tasks first. Your workspaces and conversations will remain."
-                    : "Sign out of native Codex in this sandbox?",
+                  "Sign out of Codex across all your shared threads? Stop running tasks first. Your workspaces and conversations will remain.",
                 )
               )
                 void action({ type: "logout" });
@@ -258,9 +245,7 @@ export function AcpConversation({
           {snapshot?.status === "auth-required" && (
             <div className="border p-3">
               <p className="mb-3 text-muted-foreground">
-                {snapshot.authScope === "user"
-                  ? "Sign in once to use Codex across your shared threads."
-                  : "Sign in to native Codex for this legacy sandbox."}
+                Sign in once to use Codex across your shared threads.
               </p>
               <Button
                 variant="outline"
@@ -271,9 +256,9 @@ export function AcpConversation({
                 Sign in with ChatGPT
               </Button>
               <p className="mt-3 text-[11px] leading-4 text-muted-foreground">
-                {snapshot.authScope === "user"
-                  ? "Your login is encrypted and saved for this account. New threads reuse it. OpenAI may still require reauthorization if access expires or is revoked."
-                  : "This older thread keeps its own login. New Codex threads share one account login; this thread's files are not moved."}
+                Your login is encrypted and saved for this account. New threads
+                reuse it. OpenAI may still require reauthorization if access
+                expires or is revoked.
               </p>
             </div>
           )}

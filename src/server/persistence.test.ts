@@ -120,7 +120,7 @@ afterAll(async () => {
   await mf?.dispose();
 });
 
-test("runtime endpoints enforce thread ownership and WebSocket origin before accessing a sandbox", async () => {
+test("runtime endpoints enforce thread ownership and write origin before accessing a sandbox", async () => {
   const created = (await (
     await request("/projects", "POST", {
       name: "repo",
@@ -180,7 +180,7 @@ test("runtime endpoints enforce thread ownership and WebSocket origin before acc
         { origin: "https://evil.test" },
       )
     ).status,
-  ).toBe(403);
+  ).toBe(404);
   expect(
     (await request(`/threads/${thread.id}/runtime/file?path=..%2Fsecret`))
       .status,
@@ -376,7 +376,7 @@ test("page session resolution verifies cookies, admission and revocation without
   expect(await getViewer({}, alice)).toEqual({ configured: false, user: null });
 });
 
-test("new Codex threads share a user runtime while existing metadata defaults to legacy", async () => {
+test("only shared Codex threads are exposed; retired records cannot access a runtime", async () => {
   const project = await createProject();
   const created = await createThread(project.id);
   expect(created.runtime).toBe("user");
@@ -386,9 +386,52 @@ test("new Codex threads share a user runtime while existing metadata defaults to
     .bind("old-thread", project.id)
     .run();
   const data = (await (await request("/workspace")).json()) as WorkspaceData;
-  expect(data.threads.find((t) => t.id === "old-thread")?.runtime).toBe(
-    "thread",
-  );
+  expect(data.threads).toEqual([created]);
+  for (const operation of [
+    "status",
+    "saved",
+    "acp",
+    "files",
+    "review",
+    "start",
+    "publish",
+  ]) {
+    expect(
+      (
+        await request(
+          `/threads/old-thread/runtime/${operation}`,
+          ["start", "publish"].includes(operation) ? "POST" : "GET",
+        )
+      ).status,
+    ).toBe(404);
+  }
+  expect((await request("/threads/old-thread", "DELETE")).status).toBe(404);
+  expect(
+    (
+      await request("/threads/old-thread", "PATCH", {
+        name: "revive",
+        agent: "codex",
+        version: 1,
+      })
+    ).status,
+  ).toBe(404);
+  expect(
+    (
+      await request(`/projects/${project.id}/threads`, "POST", {
+        name: "unsupported",
+        agent: "claude",
+      })
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await request(`/threads/${created.id}`, "PATCH", {
+        name: "unsupported",
+        agent: "claude",
+        version: 1,
+      })
+    ).status,
+  ).toBe(400);
   expect(
     (
       await request(`/projects/${project.id}/threads`, "POST", {
@@ -566,7 +609,7 @@ describe("D1-backed workspace authorization", () => {
       (
         await request(`/threads/${thread.id}`, "PATCH", {
           name: "permissions fixed",
-          agent: "claude",
+          agent: "codex",
           version: 1,
         })
       ).status,
@@ -581,8 +624,8 @@ describe("D1-backed workspace authorization", () => {
       {
         ...thread,
         name: "permissions fixed",
-        agent: "claude",
-        runtime: "thread",
+        agent: "codex",
+        runtime: "user",
         version: 2,
       },
     ]);
@@ -606,7 +649,7 @@ describe("D1-backed workspace authorization", () => {
         await request(
           `/projects/${project.id}/threads`,
           "POST",
-          { name: "intruder", agent: "claude" },
+          { name: "intruder", agent: "codex" },
           "bob",
         )
       ).status,
@@ -616,7 +659,7 @@ describe("D1-backed workspace authorization", () => {
         await request(
           `/threads/${thread.id}`,
           "PATCH",
-          { name: "stolen", agent: "claude", version: 1 },
+          { name: "stolen", agent: "codex", version: 1 },
           "bob",
         )
       ).status,
@@ -645,7 +688,7 @@ describe("D1-backed workspace authorization", () => {
       (
         await request(`/threads/${thread.id}`, "PATCH", {
           name: "winner",
-          agent: "claude",
+          agent: "codex",
           version: 1,
         })
       ).status,

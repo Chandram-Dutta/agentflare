@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createBridge, createUserBridge } from "./bridge.mjs";
+import { createUserBridge } from "./bridge.mjs";
 import { createCheckpointLoop } from "./checkpoint-loop.mjs";
 
 const fake = fileURLToPath(new URL("./fake-agent.mjs", import.meta.url));
@@ -22,15 +22,24 @@ async function until(condition) {
 }
 async function fixture(run) {
   const cwd = await mkdtemp(join(tmpdir(), "acp-test-"));
+  await mkdir(join(cwd, threadA, "repo"), { recursive: true });
   const bridges = [];
   const start = (args = []) => {
-    const bridge = createBridge({
-      command: [process.execPath, fake, ...args],
-      cwd,
-      sessionFile: join(cwd, "session"),
-    });
+    const bridge = createUserBridge({ command: [process.execPath, fake, "shared", ...args], root: cwd });
     bridges.push(bridge);
-    return bridge;
+    const opened = bridge.session(threadA);
+    let session;
+    let closed = false;
+    return {
+      get snapshot() { return session?.snapshot ?? { status: "connecting", messages: [], permissions: [], configOptions: [] }; },
+      ready: opened.then((value) => { session = value; return value.ready; }),
+      act: (action) => session ? session.act(action) : opened.then((value) => value.act(action)),
+      close: () => {
+        if (closed) return;
+        closed = true;
+        return bridge.close();
+      },
+    };
   };
   try {
     await run(start, cwd);
@@ -75,7 +84,8 @@ test("device-code acceptance is not authentication; stream and permission choice
     await until(() => b.snapshot.permissions.length === 1);
     const snapshot = JSON.parse(JSON.stringify(b.snapshot));
     expect(snapshot.messages.filter((m) => m.role === "user")).toHaveLength(1);
-    expect(snapshot.messages.at(-1).text).toBe("Inspecting files.");
+    expect(snapshot.messages.at(-1).text).toContain(`session-${threadA}`);
+    expect(snapshot.messages.at(-1).text).toEndWith("files.");
     const id = snapshot.permissions[0].id;
     await expect(
       b.act({ type: "permission", id, optionId: "invented" }),
@@ -129,6 +139,7 @@ test("cancel releases permissions and process death disables prompt submission",
 test("large output is bounded and truncation is reported", async () =>
   fixture(async (start, cwd) => {
     await writeFile(join(cwd, "authenticated"), "synthetic");
+    await writeFile(join(cwd, threadA, "acp-session"), "saved-session");
     const b = start();
     await b.ready;
     await b.act({ type: "prompt", text: "long", requestId: "long" });
@@ -160,6 +171,7 @@ test("new and loaded sessions expose runtime config without boolean capability",
 test("model changes replace options, clear usage, and serialize prompts", async () =>
   fixture(async (start, cwd) => {
     await writeFile(join(cwd, "authenticated"), "synthetic");
+    await writeFile(join(cwd, threadA, "acp-session"), "saved-session");
     const b = start();
     await b.ready;
     await b.act({ type: "prompt", text: "telemetry", requestId: "usage" });
@@ -200,6 +212,7 @@ test("invented config choices are rejected without mutating state", async () =>
 test("config updates replace the list and thought chunks stay separate from answers", async () =>
   fixture(async (start, cwd) => {
     await writeFile(join(cwd, "authenticated"), "synthetic");
+    await writeFile(join(cwd, threadA, "acp-session"), "saved-session");
     const b = start();
     await b.ready;
     await b.act({ type: "prompt", text: "telemetry", requestId: "telemetry" });

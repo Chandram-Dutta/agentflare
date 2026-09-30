@@ -1,7 +1,7 @@
 export type RuntimeState = {
   started: boolean;
   repository?: string;
-  agent?: "claude" | "codex";
+  agent?: "codex";
 };
 export type RepositoryFile = { path: string; content: string };
 export type GitChange = { path: string; index: string; worktree: string };

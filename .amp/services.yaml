@@ -7,4 +7,4 @@ services:
     health: /api/health
     portal:
       title: Agentflare
-      description: Terminal-first workspace. Configure installation credentials to start sandboxes.
+      description: Codex ACP workspace. Configure installation credentials to start sandboxes.
