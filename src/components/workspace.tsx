@@ -46,6 +46,7 @@ import {
   useThreadStore,
 } from "./thread-state";
 import { ProjectSettings } from "@/components/project-settings";
+import { LandingPage } from "./landing-page";
 import { apiRequest } from "@/lib/api-client";
 import {
   agents,
@@ -175,9 +176,18 @@ function WorkspaceContent() {
     );
   }
 
+  if (!session?.user)
+    return (
+      <LandingPage
+        configured={session?.configured}
+        pending={pending}
+        error={error}
+        onSignIn={signIn}
+      />
+    );
+
   return (
     <div className="workspace-shell flex min-h-dvh flex-col">
-      {!session?.user && renderHeader()}
       {error && (
         <div className="flex items-center justify-between gap-4 border-b px-4 py-3 text-xs">
           <p role="alert" className="text-destructive">
@@ -192,50 +202,9 @@ function WorkspaceContent() {
           </Button>
         </div>
       )}
-      {session?.user ? (
-        <ThreadStateProvider>
-          <SavedWorkspace renderHeader={renderHeader} />
-        </ThreadStateProvider>
-      ) : (
-        <main className="mx-auto mt-16 w-full max-w-lg px-6 text-xs sm:mt-28">
-          {!session ? (
-            <p role="status" className="text-muted-foreground">
-              {error
-                ? "Unable to load this installation."
-                : "loading workspace…"}
-            </p>
-          ) : !session.configured ? (
-            <>
-              <h2 className="font-normal">installation setup required</h2>
-              <p className="mt-3 leading-6 text-muted-foreground">
-                Configure D1, a GitHub OAuth app, the authentication secret and
-                allowed GitHub IDs before signing in.
-              </p>
-              <p className="mt-3 leading-6 text-muted-foreground">
-                See the self-hosting instructions in the repository README.
-                Credentials belong in Worker secrets or your local .dev.vars,
-                never here.
-              </p>
-            </>
-          ) : (
-            <>
-              <h2 className="font-normal">sign in to your workspace</h2>
-              <p className="mt-3 leading-6 text-muted-foreground">
-                Use an account allowed by this installation. Repository access
-                and agent credentials are separate from sign-in.
-              </p>
-              <Button
-                variant="outline"
-                className="mt-5 rounded-none text-xs font-normal"
-                disabled={pending}
-                onClick={signIn}
-              >
-                {pending ? "connecting…" : "continue with GitHub"}
-              </Button>
-            </>
-          )}
-        </main>
-      )}
+      <ThreadStateProvider>
+        <SavedWorkspace renderHeader={renderHeader} />
+      </ThreadStateProvider>
     </div>
   );
 }
