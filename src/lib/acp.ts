@@ -13,10 +13,13 @@ export type AcpMessage = {
 export type AcpActivity = {
   status: AcpSnapshot["status"];
   attention: boolean;
+  attentionId?: string;
   turn?: string;
+  turnCancelled?: boolean;
 };
 
 export type AcpSnapshot = {
+  turnCancelled?: boolean;
   authScope?: "user";
   authPersistence?: "saved" | "pending";
   saved?: boolean;

@@ -22,9 +22,9 @@ export function ThreadStateProvider({ children }: { children: ReactNode }) {
     async function tick() {
       if (cancelled || running) return;
       running = true;
-      if (!document.hidden) {
+      if (!document.hidden || store.notificationsEnabled) {
         if (Date.now() >= activityAt) {
-          activityAt = Date.now() + 3000;
+          activityAt = Date.now() + (document.hidden ? 10000 : 3000);
           await store.pollActivity();
         }
         if (!cancelled && !document.hidden && store.active)

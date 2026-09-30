@@ -285,19 +285,20 @@ export function createUserBridge({
       const content = promptContent(action, c.snapshot.promptCapabilities);
       c.promptIds.add(action.requestId); if (c.promptIds.size > 1000) c.promptIds.delete(c.promptIds.values().next().value);
       c.turn = action.requestId;
+      delete c.snapshot.turnCancelled;
       append(c, "user", action.text, action.requestId);
       if (action.attachments?.length) c.snapshot.messages.at(-1).content = content;
       boundContent(c.snapshot);
       c.currentMessage = undefined; c.snapshot.status = "running";
       c.prompt = agent.request(methods.agent.session.prompt, { sessionId: c.sessionId, prompt: content })
-        .then(() => { settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; onSettled(); }).catch((e) => fail(c, e, "prompt"));
+        .then((result) => { if (result.stopReason === "cancelled") c.snapshot.turnCancelled = true; settle(c); if (!dead && !c.deleted) c.snapshot.status = "ready"; onSettled(); }).catch((e) => fail(c, e, "prompt"));
     } else if (action.type === "permission") {
       const p = c.permissions.get(action.id);
       if (!p || !p.options.some((x) => x.optionId === action.optionId)) throw new Error("Permission request expired or invalid choice");
       c.permissions.delete(action.id); c.snapshot.permissions = c.snapshot.permissions.filter((x) => x.id !== action.id);
       p.resolve({ outcome: { outcome: "selected", optionId: action.optionId } });
     } else if (action.type === "cancel") {
-      if (c.snapshot.status === "running") { settle(c); await agent.notify(methods.agent.session.cancel, { sessionId: c.sessionId }); }
+      if (c.snapshot.status === "running") { c.snapshot.turnCancelled = true; settle(c); await agent.notify(methods.agent.session.cancel, { sessionId: c.sessionId }); }
     } else if (action.type === "set-config") {
       if (c.snapshot.status !== "ready") throw new Error("Cannot change configuration while busy");
       const option = c.snapshot.configOptions.find((x) => x.id === action.configId);
@@ -335,7 +336,9 @@ export function createUserBridge({
     activity: () => Object.fromEntries([...contexts].map(([id, { snapshot: s, turn }]) => [id, {
       status: s.status,
       attention: s.permissions.length > 0 || Boolean(s.login),
+      ...((s.permissions[0]?.id ?? s.login?.id) ? { attentionId: s.permissions[0]?.id ?? s.login?.id } : {}),
       turn: turn ?? s.messages.findLast((m) => m.role === "user")?.id,
+      ...(s.turnCancelled ? { turnCancelled: true } : {}),
     }])),
     async deleteSession(threadId) {
     if (!UUID.test(threadId)) throw new Error("Invalid thread id");

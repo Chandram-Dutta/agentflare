@@ -1,6 +1,10 @@
 import type { AcpAction, AcpActivity, AcpSnapshot, AcpContent } from "./acp";
 import type { RuntimeState, BranchReview, GitChange } from "./runtime";
 import { apiRequest } from "./api-client";
+import {
+  notificationKind,
+  type ThreadNotification,
+} from "./thread-notifications";
 
 export type RepositoryState = {
   files: string[];
@@ -39,10 +43,15 @@ const empty: ThreadState = {
 };
 
 // One owner per signed-in workspace; views subscribe without owning requests.
-// Nothing is persisted to localStorage (transcripts and drafts can be sensitive).
+// Transcripts and drafts aren't persisted to localStorage; only the separate
+// desktop-notification preference is stored there.
 export class ThreadStateStore {
   private entries = new Map<string, ThreadState>();
   private listeners = new Set<() => void>();
+  private notificationListeners = new Set<
+    (event: ThreadNotification) => void
+  >();
+  private finishedTurns = new Map<string, string>();
   private versions = new Map<string, number>();
   private activityVersions = new Map<string, number>();
   private deleted = new Set<string>();
@@ -52,6 +61,7 @@ export class ThreadStateStore {
   active?: string;
   private viewed?: string;
   activityError = false;
+  notificationsEnabled = false;
   constructor(private request: typeof apiRequest = apiRequest) {}
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -60,6 +70,17 @@ export class ThreadStateStore {
     };
   };
   getRevision = () => this.revision;
+  subscribeNotifications = (listener: (event: ThreadNotification) => void) => {
+    this.notificationListeners.add(listener);
+    return () => {
+      this.notificationListeners.delete(listener);
+    };
+  };
+  setNotificationsEnabled(enabled: boolean) {
+    if (this.notificationsEnabled === enabled) return;
+    this.notificationsEnabled = enabled;
+    this.emit();
+  }
   get = (id: string) => this.entries.get(id) ?? empty;
   update(id: string, change: Partial<ThreadState>) {
     if (this.deleted.has(id)) return;
@@ -80,6 +101,7 @@ export class ThreadStateStore {
     this.deleted.add(id);
     this.versions.set(id, (this.versions.get(id) ?? 0) + 1);
     this.entries.delete(id);
+    this.finishedTurns.delete(id);
     this.loads.delete(id);
     this.epoch++;
     this.emit();
@@ -91,13 +113,19 @@ export class ThreadStateStore {
       this.update(id, { unread: false });
   }
   private accept(id: string, snapshot: AcpSnapshot) {
-    this.setActivity(id, {
-      status: snapshot.status,
-      attention: snapshot.permissions.length > 0 || Boolean(snapshot.login),
-      turn:
-        snapshot.messages.findLast((m) => m.role === "user")?.id ??
-        this.get(id).activity?.turn,
-    });
+    this.setActivity(
+      id,
+      {
+        status: snapshot.status,
+        attention: snapshot.permissions.length > 0 || Boolean(snapshot.login),
+        attentionId: snapshot.permissions[0]?.id ?? snapshot.login?.id,
+        turnCancelled: snapshot.turnCancelled,
+        turn:
+          snapshot.messages.findLast((m) => m.role === "user")?.id ??
+          this.get(id).activity?.turn,
+      },
+      !snapshot.saved,
+    );
     const previous = this.get(id).snapshot;
     if (
       snapshot.status === "connecting" &&
@@ -113,11 +141,19 @@ export class ThreadStateStore {
       error: "",
     });
   }
-  private setActivity(id: string, activity: AcpActivity) {
+  private setActivity(id: string, activity: AcpActivity, live = true) {
+    // Historical transcripts are not observations of the running agent.
+    if (!live) return;
     this.activityVersions.set(id, (this.activityVersions.get(id) ?? 0) + 1);
     const previous = this.get(id);
+    let kind = notificationKind(previous.activity, activity);
+    if (kind === "finished" && this.finishedTurns.get(id) === activity.turn)
+      kind = undefined;
+    if (activity.status === "ready" && activity.turn)
+      this.finishedTurns.set(id, activity.turn);
     const finished =
       activity.status === "ready" &&
+      !activity.turnCancelled &&
       Boolean(activity.turn) &&
       (previous.activity?.turn !== activity.turn ||
         previous.activity?.status === "running");
@@ -125,11 +161,16 @@ export class ThreadStateStore {
       activity:
         previous.activity?.status === activity.status &&
         previous.activity?.turn === activity.turn &&
-        previous.activity?.attention === activity.attention
+        previous.activity?.attention === activity.attention &&
+        previous.activity?.turnCancelled === activity.turnCancelled &&
+        previous.activity?.attentionId === activity.attentionId
           ? previous.activity
           : activity,
       unread: id === this.viewed ? false : previous.unread || finished,
     });
+    if (kind && this.notificationsEnabled)
+      for (const listener of this.notificationListeners)
+        listener({ threadId: id, kind });
   }
   async ensure(id: string) {
     if (this.loads.has(id)) return this.loads.get(id);
