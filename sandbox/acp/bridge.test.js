@@ -146,11 +146,9 @@ test("new and loaded sessions expose runtime config without boolean capability",
     const first = start();
     await first.ready;
     expect(first.snapshot.configOptions.map((option) => option.id)).toEqual([
-      "mode", "model", "reasoning_effort", "fast-mode",
+      "model", "reasoning_effort", "fast-mode",
     ]);
-    expect(first.snapshot.configOptions[0].options.map((option) => option.value)).toEqual([
-      "read-only", "workspace-write", "agent", "agent-full-access",
-    ]);
+    expect(first.snapshot.configOptions.some(option => option.id === "mode")).toBe(false);
     await first.close();
     const loaded = start();
     await loaded.ready;
@@ -419,3 +417,47 @@ test("checkpoint loop pauses only after a successful idle save and re-arms for n
     expect(calls).toBe(3);
   } finally { loop.stop(); }
 });
+
+for (const shared of [false, true]) {
+  const label = shared ? "shared" : "single";
+  async function modeFixture(args, run, loaded = false) {
+    const root = await mkdtemp(join(tmpdir(), "acp-mode-"));
+    await writeFile(join(root, "authenticated"), "synthetic");
+    let bridge;
+    try {
+      if (shared) {
+        for (const id of [threadA, threadB]) await mkdir(join(root, id, "repo"), { recursive: true });
+        if (loaded) await writeFile(join(root, threadA, "acp-session"), `session-${threadA}`);
+        bridge = createUserBridge({ command: [process.execPath, fake, "shared", ...args], root });
+        const a = await bridge.session(threadA);
+        const b = await bridge.session(threadB);
+        await Promise.all([a.ready, b.ready]);
+        await run(a, b);
+      } else {
+        if (loaded) await writeFile(join(root, "session"), "saved-session");
+        bridge = createBridge({ command: [process.execPath, fake, ...args], cwd: root, sessionFile: join(root, "session") });
+        await bridge.ready;
+        await run(bridge);
+      }
+    } finally {
+      await bridge?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+  for (const loaded of [false, true]) {
+    test(`${label} ignores legacy modes for ${loaded ? "loaded" : "new"} sessions`, async () => {
+      await modeFixture([], async (a) => {
+        expect(a.snapshot.configOptions.some(o => o.id === "mode")).toBe(false);
+        await expect(a.act({ type: "set-config", configId: "mode", value: "read-only" })).rejects.toThrow();
+      }, loaded);
+    });
+    test(`${label} native mode config uses set_config_option for ${loaded ? "loaded" : "new"} sessions`, async () => {
+      await modeFixture(["native-mode"], async (a, b) => {
+        await a.act({ type: "set-config", configId: "mode", value: "read-only" });
+        expect(a.snapshot.configOptions.find(o => o.id === "mode").currentValue).toBe("read-only");
+        expect(a.snapshot.configOptions.filter(o => o.id === "mode")).toHaveLength(1);
+        if (b) expect(b.snapshot.configOptions.find(o => o.id === "mode").currentValue).toBe("workspace-write");
+      }, loaded);
+    });
+  }
+}
