@@ -19,6 +19,21 @@ test("renders code literally and supports headings, lists, tables and task lists
   expect(html).toContain("<td>Ready</td>");
 });
 
+test("turns Mermaid fences into diagrams without changing other code blocks", () => {
+  const html = renderToStaticMarkup(
+    <ChatMarkdown>
+      {
+        "```mermaid\ngraph LR\n  Chat --> Thread\n```\n\n```typescript\nconst diagram = false;\n```"
+      }
+    </ChatMarkdown>,
+  );
+  expect(html.match(/data-mermaid-diagram/g)?.length).toBe(1);
+  expect(html).toContain("graph LR\n  Chat --&gt; Thread");
+  expect(html).toContain('class="language-mermaid"');
+  expect(html).toContain('class="language-typescript"');
+  expect(html).toContain("const diagram = false;");
+});
+
 test("renders HTML and remote images but strips executable markup and unsafe URLs", () => {
   const html = renderToStaticMarkup(
     <ChatMarkdown>

@@ -1,3 +1,4 @@
+import { isValidElement, type ReactNode } from "react";
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -6,6 +7,7 @@ import {
   resolveRepositoryLink,
   type RepositoryFileLink,
 } from "@/lib/repository-links";
+import { MermaidDiagram } from "./mermaid-diagram";
 
 export type RepositoryLinkProps = {
   threadId?: string;
@@ -13,6 +15,19 @@ export type RepositoryLinkProps = {
 };
 
 type MarkdownNode = { type?: string; url?: string; children?: MarkdownNode[] };
+
+function MermaidPre({ children }: { children?: ReactNode }) {
+  if (
+    isValidElement<{ className?: string; children?: ReactNode }>(children) &&
+    /(?:^|\s)language-mermaid(?:\s|$)/i.test(
+      children.props.className ?? "",
+    )
+  ) {
+    const source = String(children.props.children ?? "").replace(/\n$/, "");
+    return <MermaidDiagram source={source} />;
+  }
+  return <pre>{children}</pre>;
+}
 
 function preserveRootFileLocations(threadId?: string) {
   return () => (tree: MarkdownNode) => {
@@ -49,6 +64,7 @@ export function ChatMarkdown({
           return defaultUrlTransform(url);
         }}
         components={{
+          pre: MermaidPre,
           img: ({ src, alt, title, width, height }) => (
             // Agent output may point to any image host, not a Next image allowlist.
             // eslint-disable-next-line @next/next/no-img-element
