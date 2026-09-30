@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "./ui/button";
+import { ChatMarkdown } from "./chat-markdown";
 import type { AcpAction, AcpSnapshot } from "@/lib/acp";
 import { apiRequest } from "@/lib/api-client";
 
@@ -183,10 +184,12 @@ export function AcpConversation({ threadId }: { threadId: string }) {
           {snapshot?.messages.map((message) =>
             message.role === "thought" ? (
               <details key={message.id} className="pl-3 text-muted-foreground">
-                <summary className="cursor-pointer text-[10px]">Thinking</summary>
-                <p className="mt-1 whitespace-pre-wrap break-words leading-5">
-                  {message.text}
-                </p>
+                <summary className="cursor-pointer text-[10px]">
+                  Thinking
+                </summary>
+                <div className="mt-1">
+                  <ChatMarkdown>{message.text}</ChatMarkdown>
+                </div>
               </details>
             ) : (
               <article
@@ -201,9 +204,13 @@ export function AcpConversation({ threadId }: { threadId: string }) {
                   {message.role}
                   {message.status ? ` / ${message.status}` : ""}
                 </header>
-                <p className="whitespace-pre-wrap break-words leading-5">
-                  {message.text}
-                </p>
+                {message.role === "tool" ? (
+                  <p className="whitespace-pre-wrap break-words leading-5">
+                    {message.text}
+                  </p>
+                ) : (
+                  <ChatMarkdown>{message.text}</ChatMarkdown>
+                )}
               </article>
             ),
           )}
@@ -387,10 +394,13 @@ export function AcpConversation({ threadId }: { threadId: string }) {
                   <span>context (last reported)</span>
                   <span>
                     {snapshot.contextUsage.used.toLocaleString()} /{" "}
-                    {snapshot.contextUsage.size.toLocaleString()} ({Math.round(
-                      (snapshot.contextUsage.used / snapshot.contextUsage.size) *
+                    {snapshot.contextUsage.size.toLocaleString()} (
+                    {Math.round(
+                      (snapshot.contextUsage.used /
+                        snapshot.contextUsage.size) *
                         100,
-                    )}%)
+                    )}
+                    %)
                   </span>
                 </div>
                 <progress
