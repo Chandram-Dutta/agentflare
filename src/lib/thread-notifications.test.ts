@@ -42,7 +42,7 @@ test("only live completion and attention changes notify, including a turn betwee
   );
 });
 
-test("browser delivery requires a hidden tab, secure context, and permission; clicks open the thread", () => {
+test("browser delivery requires an inactive tab, secure context, and permission; clicks open the thread", () => {
   const keys = ["window", "document", "Notification"] as const;
   const original = keys.map((key) =>
     Object.getOwnPropertyDescriptor(globalThis, key),
@@ -69,7 +69,8 @@ test("browser delivery requires a hidden tab, secure context, and permission; cl
     isSecureContext: true,
     focus: () => focused++,
   };
-  const document = { hidden: true };
+  let hasFocus = true;
+  const document = { hidden: true, hasFocus: () => hasFocus };
   for (const [key, value] of Object.entries({
     window: browser,
     document,
@@ -107,6 +108,15 @@ test("browser delivery requires a hidden tab, secure context, and permission; cl
       () => {},
     );
     expect(created[1].title).toBe("Codex needs your attention");
+    // Another app can have focus while this browser tab remains visible.
+    document.hidden = false;
+    hasFocus = false;
+    expect(show()).toBeDefined();
+    expect(created).toHaveLength(3);
+    hasFocus = true;
+    expect(show()).toBeUndefined();
+    expect(created).toHaveLength(3);
+    document.hidden = true;
     Object.defineProperty(globalThis, "Notification", {
       value: class {
         static permission = "granted";

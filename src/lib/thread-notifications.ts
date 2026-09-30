@@ -37,7 +37,7 @@ export function showThreadNotification(
     !("Notification" in window) ||
     !window.isSecureContext ||
     Notification.permission !== "granted" ||
-    !document.hidden
+    (!document.hidden && document.hasFocus())
   )
     return;
   // Some browsers expose permission but don't support the desktop constructor.

@@ -137,8 +137,9 @@ quota. Agent-emitted thinking text is collapsed separately from the final answer
 
 Use the bell in the workspace header to enable desktop notifications. After
 granting browser permission, completed turns and new approval/sign-in requests
-notify while the tab is hidden; clicking a notification selects its project and
-thread. The preference is saved per account in this browser. No permission prompt
+notify while the tab is hidden or another app/window has focus; clicking a
+notification selects its project and thread. The preference is saved per account
+in this browser. No permission prompt
 appears until you choose to enable notifications. Blocked permissions must be
 changed in browser site settings. HTTPS (or localhost) and a browser supporting
 desktop notifications are required.
