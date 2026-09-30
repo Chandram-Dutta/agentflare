@@ -13,6 +13,7 @@ export type AcpMessage = {
 export type AcpActivity = {
   status: AcpSnapshot["status"];
   attention: boolean;
+  attentionId?: string;
   turn?: string;
 };
 

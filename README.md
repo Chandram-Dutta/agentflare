@@ -135,6 +135,20 @@ the supported choices. Fast mode may increase usage; it is not a generic speed d
 Context usage is the last Codex-reported estimate, not billing or subscription
 quota. Agent-emitted thinking text is collapsed separately from the final answer.
 
+Use the bell in the workspace header to enable desktop notifications. After
+granting browser permission, completed turns and new approval/sign-in requests
+notify while the tab is hidden; clicking a notification selects its project and
+thread. The preference is saved per account in this browser. No permission prompt
+appears until you choose to enable notifications. Blocked permissions must be
+changed in browser site settings. HTTPS (or localhost) and a browser supporting
+desktop notifications are required.
+
+With notifications enabled, hidden tabs poll the existing activity endpoint every
+10 seconds without fetching conversations, renewing workspace presence, or booting
+a sandbox. Browser background throttling can delay delivery. Keep the tab open;
+this is not push delivery after the tab closes. Initial activity is treated as a
+baseline, so old completions and approvals don't generate notifications on reload.
+
 ## Development
 
 Use Bun 1.3.10, Node 22.12+ (Vite's Node runtime), Docker Engine and Buildx. Install and run:

@@ -45,6 +45,8 @@ import {
   useThreadStore,
 } from "./thread-state";
 import { ProjectSettings } from "@/components/project-settings";
+import { NotificationSettings } from "@/components/notification-settings";
+import { showThreadNotification } from "@/lib/thread-notifications";
 import type { Viewer } from "@/server/auth";
 import { apiRequest } from "@/lib/api-client";
 import {
@@ -80,6 +82,7 @@ export function Workspace({ user }: { user: Viewer }) {
         </h1>
         <div className="flex min-w-0 flex-1 items-center gap-1">{projects}</div>
         <div className="flex shrink-0 items-center gap-1 text-muted-foreground">
+          <NotificationSettings userId={user.id} />
           {user && (
             <>
               <span className="mr-2 hidden max-w-24 truncate text-[11px] lg:block">
@@ -146,8 +149,44 @@ function SavedWorkspace({
 }) {
   const [data, setData] = useState<WorkspaceData | null>(null);
   const [selected, setSelected] = useState("");
+  const [selectedThreads, setSelectedThreads] = useState<
+    Record<string, string>
+  >({});
+  const store = useThreadStore();
   const [paneControls, setPaneControls] = useState<HTMLDivElement | null>(null);
   const [error, setError] = useState("");
+  useEffect(() => {
+    if (!data) return;
+    const notifications = new Set<Notification>();
+    const unsubscribe = store.subscribeNotifications((event) => {
+      const thread = data.threads.find(
+        (thread) => thread.id === event.threadId,
+      );
+      const project = data.projects.find(
+        (project) => project.id === thread?.projectId,
+      );
+      if (!thread || !project) return;
+      const notification = showThreadNotification(
+        event,
+        `${project.name} / ${thread.name}`,
+        () => {
+          setSelected(project.id);
+          setSelectedThreads((current) => ({
+            ...current,
+            [project.id]: thread.id,
+          }));
+        },
+      );
+      if (notification) {
+        notifications.add(notification);
+        notification.onclose = () => notifications.delete(notification);
+      }
+    });
+    return () => {
+      unsubscribe();
+      for (const notification of notifications) notification.close();
+    };
+  }, [data, store]);
   useEffect(() => {
     let cancelled = false;
     void apiRequest<WorkspaceData>("/workspace")
@@ -276,6 +315,13 @@ function SavedWorkspace({
             paneControls={paneControls}
             active={active === project.id}
             threads={data.threads.filter((t) => t.projectId === project.id)}
+            selected={selectedThreads[project.id] ?? ""}
+            setSelected={(id) =>
+              setSelectedThreads((current) => ({
+                ...current,
+                [project.id]: id,
+              }))
+            }
             onProjectSave={savedProject}
             onThreadSave={savedThread}
             onThreadDelete={(id) =>
@@ -299,6 +345,8 @@ function ProjectWorkspace({
   paneControls,
   active,
   threads,
+  selected,
+  setSelected,
   onProjectSave,
   onThreadSave,
   onThreadDelete,
@@ -307,11 +355,12 @@ function ProjectWorkspace({
   paneControls: HTMLDivElement | null;
   active: boolean;
   threads: Thread[];
+  selected: string;
+  setSelected: (id: string) => void;
   onProjectSave: (project: Project) => void;
   onThreadSave: (thread: Thread) => void;
   onThreadDelete: (id: string) => void;
 }) {
-  const [selected, setSelected] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Thread>();
   const store = useThreadStore();
   const [pending, setPending] = useState(false);

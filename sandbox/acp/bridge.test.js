@@ -311,8 +311,8 @@ test("shared bridge isolates routing and deletion", async () => {
     await b.act({ type: "prompt", text: "inspect", requestId: "same-id" });
     await until(() => a.snapshot.permissions.length === 1 && b.snapshot.permissions.length === 1);
     expect(bridge.activity()).toEqual({
-      [threadA]: { status: "running", attention: true, turn: "same-id" },
-      [threadB]: { status: "running", attention: true, turn: "same-id" },
+      [threadA]: { status: "running", attention: true, attentionId: a.snapshot.permissions[0].id, turn: "same-id" },
+      [threadB]: { status: "running", attention: true, attentionId: b.snapshot.permissions[0].id, turn: "same-id" },
     });
     expect(a.snapshot.messages.at(-1).text).toContain(threadA);
     expect(b.snapshot.messages.at(-1).text).toContain(threadB);

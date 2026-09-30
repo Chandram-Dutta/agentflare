@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { ThreadStateStore, activityLabel } from "./thread-state";
-import type { AcpSnapshot } from "./acp";
+import type { AcpSnapshot, AcpActivity } from "./acp";
+import type { ThreadNotification } from "./thread-notifications";
 import type { apiRequest } from "./api-client";
 
 function deferred<T>() {
@@ -272,4 +273,91 @@ test("failed activity is unknown, retries recover, and a lost bridge is not comp
   await store.pollActivity();
   expect(activityLabel(store.get("a"))).toBe("not connected");
   expect(store.get("a").unread).toBe(false);
+});
+
+test("notifications baseline old activity, deduplicate turns, and track successive approvals", async () => {
+  let activity: Record<string, AcpActivity> = {
+    a: { status: "ready", attention: false, turn: "old" },
+    b: {
+      status: "running",
+      attention: true,
+      turn: "t1",
+      attentionId: "old-approval",
+    },
+  };
+  const store = storeWith(async () => activity);
+  store.setNotificationsEnabled(true);
+  const events: ThreadNotification[] = [];
+  const unsubscribe = store.subscribeNotifications((event) =>
+    events.push(event),
+  );
+  await store.pollActivity();
+  expect(events).toEqual([]);
+  activity.a = { status: "running", attention: false, turn: "t2" };
+  await store.pollActivity();
+  activity.a = { ...activity.a, status: "ready" };
+  await store.pollActivity();
+  await store.pollActivity();
+  // Replaying a running snapshot for an already settled turn doesn't re-notify.
+  activity.a = { ...activity.a, status: "running" };
+  await store.pollActivity();
+  activity.a = { ...activity.a, status: "ready" };
+  await store.pollActivity();
+  expect(events).toEqual([{ threadId: "a", kind: "finished" }]);
+  activity.b = { ...activity.b, attentionId: "new-approval" };
+  await store.pollActivity();
+  await store.pollActivity();
+  expect(events.at(-1)).toEqual({ threadId: "b", kind: "attention" });
+  expect(events).toHaveLength(2);
+  store.setNotificationsEnabled(false);
+  activity.a = { ...activity.a, turn: "t3" };
+  await store.pollActivity();
+  store.setNotificationsEnabled(true);
+  await store.pollActivity();
+  expect(events).toHaveLength(2);
+  unsubscribe();
+  activity.a = { ...activity.a, turn: "t4" };
+  await store.pollActivity();
+  expect(events).toHaveLength(2);
+  activity = {};
+  await store.pollActivity();
+});
+
+test("a stopped turn and a deleted thread don't send completion notifications", async () => {
+  let activity: Record<string, AcpActivity> = {
+    a: { status: "running", attention: false, turn: "turn-1" },
+  };
+  const store = storeWith(async (_path, method) =>
+    method === "POST" ? { ...running, status: "ready" } : activity,
+  );
+  store.setNotificationsEnabled(true);
+  const events: ThreadNotification[] = [];
+  store.subscribeNotifications((event) => events.push(event));
+  await store.pollActivity();
+  await store.action("a", { type: "cancel" });
+  expect(events).toEqual([]);
+  store.forget("a");
+  activity = { a: { status: "ready", attention: false, turn: "new" } };
+  await store.pollActivity();
+  expect(events).toEqual([]);
+});
+
+test("loading a saved transcript cannot notify for historical completion over live activity", async () => {
+  const store = storeWith(async (path) => {
+    if (path === "/activity")
+      return { a: { status: "running", attention: false, turn: "current" } };
+    if (path.endsWith("/status")) return runtime;
+    return {
+      ...ready,
+      saved: true,
+      messages: [{ id: "historical", role: "user", text: "old task" }],
+    };
+  });
+  store.setNotificationsEnabled(true);
+  const events: ThreadNotification[] = [];
+  store.subscribeNotifications((event) => events.push(event));
+  await store.pollActivity();
+  await store.ensure("a");
+  expect(store.get("a").snapshot?.saved).toBe(true);
+  expect(events).toEqual([]);
 });

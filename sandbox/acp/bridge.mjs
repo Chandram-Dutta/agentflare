@@ -335,6 +335,7 @@ export function createUserBridge({
     activity: () => Object.fromEntries([...contexts].map(([id, { snapshot: s, turn }]) => [id, {
       status: s.status,
       attention: s.permissions.length > 0 || Boolean(s.login),
+      ...((s.permissions[0]?.id ?? s.login?.id) ? { attentionId: s.permissions[0]?.id ?? s.login?.id } : {}),
       turn: turn ?? s.messages.findLast((m) => m.role === "user")?.id,
     }])),
     async deleteSession(threadId) {
