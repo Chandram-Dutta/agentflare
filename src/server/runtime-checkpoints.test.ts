@@ -61,6 +61,8 @@ class FakeSandbox {
   backupOptions: unknown[] = [];
   backupCount = 0;
   failBackup = false;
+  failAuthParking = false;
+  failAuthRestore = false;
   running = false;
   healthy = true;
   quiesceStatus = 204;
@@ -70,6 +72,24 @@ class FakeSandbox {
 
   async exec(command: string) {
     this.log.push(`exec:${command}`);
+    const parked = command.match(/\/tmp\/agentflare-auth-[a-f0-9-]+/)?.[0];
+    if (parked) {
+      if (this.failAuthParking && command.startsWith("mkdir"))
+        return { success: false, stdout: "" };
+      if (this.failAuthRestore && !command.startsWith("mkdir"))
+        return { success: false, stdout: "" };
+      const source = command.startsWith("mkdir")
+        ? "/workspace/.codex/auth.json"
+        : `${parked}/auth.json`;
+      const destination = command.startsWith("mkdir")
+        ? `${parked}/auth.json`
+        : "/workspace/.codex/auth.json";
+      if (this.files.has(source)) {
+        this.files.set(destination, this.files.get(source)!);
+        this.files.delete(source);
+      }
+      return { success: true, stdout: "" };
+    }
     if (command === "test -d /workspace/threads")
       return { success: this.dirs.has("/workspace/threads"), stdout: "" };
     const repoTest = command.match(/^test -d '(.+\/repo\/\.git)'$/);
@@ -137,7 +157,9 @@ class FakeSandbox {
     const id = `backup-${++this.backupCount}`;
     this.backups.set(id, {
       dirs: new Set(this.dirs),
-      files: new Map(this.files),
+      files: new Map(
+        [...this.files].filter(([path]) => path.startsWith("/workspace/")),
+      ),
     });
     return { id };
   }
@@ -389,15 +411,33 @@ describe("durable runtime checkpoints", () => {
       "/workspace/.codex/auth.json",
       "must-not-be-archived-by-sdk",
     );
+    f.sandbox.files.set(
+      "/workspace/.codex/sessions/rollout.jsonl",
+      "native-session",
+    );
+    f.sandbox.files.set("/workspace/.codex/state_5.sqlite", "native-index");
     await f.runtime.prepareSleep();
     expect(f.sandbox.backupOptions[0]).toEqual({
       dir: "/workspace",
       gitignore: false,
-      excludes: [".codex/auth.json"],
       ttl: 3_153_600_000,
     });
-    // The fake records the whole directory image; exclusion semantics are asserted at the SDK boundary above.
     const image = f.sandbox.backups.get("backup-1")!;
+    expect(image.files.has("/workspace/.codex/auth.json")).toBe(false);
+    expect(image.files.get("/workspace/.codex/sessions/rollout.jsonl")).toBe(
+      "native-session",
+    );
+    expect(image.files.get("/workspace/.codex/state_5.sqlite")).toBe(
+      "native-index",
+    );
+    expect(f.sandbox.files.get("/workspace/.codex/auth.json")).toBe(
+      "must-not-be-archived-by-sdk",
+    );
+    expect(
+      [...f.sandbox.files.keys()].some((path) =>
+        path.startsWith("/tmp/agentflare-auth-"),
+      ),
+    ).toBe(false);
     expect(image.files.get(`${root(a)}/repo/.git/index`)).toBe(
       "synthetic-staged-index",
     );
@@ -405,6 +445,53 @@ describe("durable runtime checkpoints", () => {
       "ignored-but-preserved",
     );
     expect(image.files.get(`${root(a)}/repo/untracked.txt`)).toBe("untracked");
+  });
+
+  test("failed archives restore parked auth and credential isolation failures prevent backup", async () => {
+    for (const failure of ["archive", "isolation"]) {
+      const f = fixture();
+      seed(f, a);
+      f.sandbox.files.set("/workspace/.codex/auth.json", "preserve-login");
+      f.sandbox.failBackup = failure === "archive";
+      f.sandbox.failAuthParking = failure === "isolation";
+      await expect(f.runtime.prepareSleep()).rejects.toThrow();
+      expect(f.sandbox.files.get("/workspace/.codex/auth.json")).toBe(
+        "preserve-login",
+      );
+      expect(f.storage.records.has("runtime-backup")).toBe(false);
+      if (failure === "isolation")
+        expect(f.sandbox.backupOptions).toHaveLength(0);
+    }
+  });
+
+  test("failed credential restoration does not publish a new backup pointer", async () => {
+    const f = fixture();
+    seed(f, a);
+    await f.runtime.prepareSleep();
+    const previous = f.storage.records.get("runtime-backup");
+    f.storage.records.set("workspace-revision", 10);
+    f.sandbox.files.set("/workspace/.codex/auth.json", "preserve-login");
+    f.sandbox.failAuthRestore = true;
+    await expect(f.runtime.prepareSleep()).rejects.toThrow();
+    expect(f.storage.records.get("runtime-backup")).toEqual(previous);
+    expect([...f.sandbox.files.values()]).toContain("preserve-login");
+  });
+
+  test("legacy backup is replaced even without a new workspace revision", async () => {
+    const f = fixture();
+    seed(f, a);
+    await f.runtime.prepareSleep();
+    const pointer = f.storage.records.get("runtime-backup") as {
+      format?: number;
+    };
+    delete pointer.format;
+    await f.runtime.prepareSleep();
+    expect(f.sandbox.backupCount).toBe(2);
+    expect(f.storage.records.get("runtime-backup")).toMatchObject({
+      format: 2,
+    });
+    await f.runtime.prepareSleep();
+    expect(f.sandbox.backupCount).toBe(2);
   });
 
   test("a conversation-only turn dirties and produces a new archive", async () => {

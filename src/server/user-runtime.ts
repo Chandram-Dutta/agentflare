@@ -38,6 +38,7 @@ type BackupPointer = {
   backup: DirectoryBackup;
   savedAt: string;
   digest: string;
+  format?: 2; // Earlier archives could omit the entire native Codex home.
 };
 export class UserRuntime {
   private starting = new Map<string, Promise<RuntimeState>>();
@@ -112,7 +113,7 @@ export class UserRuntime {
     return {
       state: (await this.storage.get("checkpoint-error"))
         ? "error"
-        : pointer?.digest === revision
+        : pointer?.format === 2 && pointer.digest === revision
           ? "saved"
           : "saving",
       savedAt: pointer?.savedAt,
@@ -616,8 +617,9 @@ export class UserRuntime {
     }
     const previous = await this.storage.get<BackupPointer>("runtime-backup");
     if (
-      previous?.digest ===
-      String((await this.storage.get<number>("workspace-revision")) ?? 0)
+      previous?.format === 2 &&
+      previous.digest ===
+        String((await this.storage.get<number>("workspace-revision")) ?? 0)
     ) {
       await this.storage.delete("checkpoint-error");
       return true;
@@ -653,19 +655,38 @@ export class UserRuntime {
       (await this.storage.get<number>("workspace-revision")) ?? 0,
     );
     const previous = await this.storage.get<BackupPointer>("runtime-backup");
-    if (previous?.digest === digest) return;
-    const backup = await this.sandbox.createBackup({
-      dir: "/workspace",
-      gitignore: false,
-      excludes: [".codex/auth.json"],
-      ttl: backupTtl,
-    });
+    if (previous?.format === 2 && previous.digest === digest) return;
+    // SDK 0.12.10 expands nested exclusions into recursive mksquashfs patterns
+    // that exclude the whole parent directory. Do not exclude .codex/auth.json:
+    // that also loses native sessions. Codex and its auth poller are quiesced;
+    // park only the credential outside /workspace until the archive finishes.
+    const parked = `/tmp/agentflare-auth-${crypto.randomUUID()}`;
+    let backup: DirectoryBackup;
+    try {
+      const isolated = await this.sandbox.exec(
+        `mkdir -m 700 ${quote(parked)} && if test -f /workspace/.codex/auth.json; then mv -- /workspace/.codex/auth.json ${quote(`${parked}/auth.json`)}; fi`,
+      );
+      if (!isolated.success)
+        throw Error("Could not isolate Codex credentials for backup.");
+      backup = await this.sandbox.createBackup({
+        dir: "/workspace",
+        gitignore: false,
+        ttl: backupTtl,
+      });
+    } finally {
+      const restored = await this.sandbox.exec(
+        `if test -f ${quote(`${parked}/auth.json`)}; then mv -- ${quote(`${parked}/auth.json`)} /workspace/.codex/auth.json; fi && rmdir ${quote(parked)}`,
+      );
+      if (!restored.success)
+        throw Error("Could not restore Codex credentials after backup.");
+    }
     const savedAt = new Date().toISOString();
     // Publish only after the SDK completed archive and metadata upload.
     await this.storage.put("runtime-backup", {
       backup,
       savedAt,
       digest,
+      format: 2,
     } satisfies BackupPointer);
     if (previous && previous.backup.id !== backup.id) {
       const bucket = this.env.BACKUP_BUCKET!;

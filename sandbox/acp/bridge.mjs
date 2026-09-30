@@ -352,6 +352,8 @@ export function createUserBridge({
     if (dead) {
       await stopChildTree(child);
       await connection.close();
+      authCheckpoint?.stop();
+      await authCheckpoint?.sync();
       quiesced = true;
       return true;
     }
@@ -373,6 +375,8 @@ export function createUserBridge({
     try {
       await stopChildTree(child);
       await connection.close();
+      authCheckpoint?.stop();
+      await authCheckpoint?.sync();
       quiesced = true;
       return true;
     } finally { quiescing = false; }

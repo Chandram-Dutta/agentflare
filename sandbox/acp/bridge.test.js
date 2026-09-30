@@ -396,7 +396,8 @@ test("quiesce fences new work, removes only empty pointers, and awaits child exi
   for (const id of [threadA, threadB]) await mkdir(join(root, id, "repo"), { recursive: true });
   await writeFile(join(root, "authenticated"), "synthetic");
   let release;
-  const checkpoint = { sync: () => new Promise((resolve) => { release = resolve; }) };
+  let authStopped = false;
+  const checkpoint = { sync: () => authStopped ? Promise.resolve() : new Promise((resolve) => { release = resolve; }), stop: () => { authStopped = true; } };
   const bridge = createUserBridge({ command: [process.execPath, fake, "shared", "slow-exit"], root, authCheckpoint: checkpoint });
   try {
     const empty = await bridge.session(threadA);
@@ -412,6 +413,7 @@ test("quiesce fences new work, removes only empty pointers, and awaits child exi
     await expect(bridge.session("33333333-3333-4333-8333-333333333333")).rejects.toThrow();
     release();
     expect(await stopping).toBe(true);
+    expect(authStopped).toBe(true);
     await expect(access(join(root, threadA, "acp-session"))).rejects.toThrow();
     await access(join(root, threadB, "acp-session"));
     await access(join(root, "child-exited"));
