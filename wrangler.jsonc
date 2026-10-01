@@ -36,27 +36,52 @@
       "name": "agentflare-next",
       "workers_dev": false,
       "preview_urls": false,
+      "migrations": [
+        { "tag": "v1", "new_sqlite_classes": ["ThreadSandbox"] },
+        {
+          "tag": "v2-computer",
+          "new_sqlite_classes": ["ComputerThread", "ComputerCredentials"]
+        }
+      ],
       "containers": [
         {
           "class_name": "ThreadSandbox",
           "image": "./Dockerfile",
           "instance_type": "standard-1",
           "max_instances": 2
+        },
+        {
+          "class_name": "ComputerThread",
+          "image": "./sandbox/Computer.Dockerfile",
+          "image_build_context": ".",
+          "instance_type": "standard-1",
+          "max_instances": 2
         }
       ],
       "durable_objects": {
-        "bindings": [{ "name": "Sandboxes", "class_name": "ThreadSandbox" }]
+        "bindings": [
+          { "name": "Sandboxes", "class_name": "ThreadSandbox" },
+          { "name": "Computers", "class_name": "ComputerThread" },
+          { "name": "ComputerAuth", "class_name": "ComputerCredentials" }
+        ]
       },
+      "artifacts": [{ "binding": "ARTIFACTS", "namespace": "agentflare-next" }],
       "routes": [
         { "pattern": "agentflare-next.onlychan.xyz", "custom_domain": true }
       ],
       "vars": {
+        "BACKUP_BUCKET_NAME": "agentflare-next-workspaces",
         "BETTER_AUTH_URL": "https://agentflare-next.onlychan.xyz",
         "GITHUB_CLIENT_ID": "Iv23liBzGNYd1ZpDKH0e",
         "GITHUB_APP_ID": "5124431",
         "ALLOWED_GITHUB_IDS": "81961406"
       },
-      "r2_buckets": [],
+      "r2_buckets": [
+        {
+          "binding": "BACKUP_BUCKET",
+          "bucket_name": "agentflare-next-workspaces"
+        }
+      ],
       "d1_databases": [
         {
           "binding": "DB",

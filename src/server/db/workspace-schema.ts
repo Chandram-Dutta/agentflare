@@ -27,7 +27,7 @@ export const thread = sqliteTable(
     name: text("name").notNull(),
     agent: text("agent").$type<AgentId>().notNull(),
     runtime: text("runtime")
-      .$type<"thread" | "user">()
+      .$type<"thread" | "user" | "computer">()
       .notNull()
       .default("thread"),
     version: integer("version").notNull().default(1),

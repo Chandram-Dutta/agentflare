@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { project, thread } from "./db/workspace-schema";
 import type { Bindings } from "./env";
@@ -26,7 +26,7 @@ export async function workspaceRouteExists(
         and(
           eq(thread.id, route.changeId),
           eq(thread.projectId, owned.id),
-          eq(thread.runtime, "user"),
+          inArray(thread.runtime, ["user", "computer"]),
           eq(thread.agent, "codex"),
         ),
       )

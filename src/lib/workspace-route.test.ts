@@ -7,9 +7,11 @@ test("project, change and review surfaces have distinct stable URLs", () => {
   expect(workspaceHref("alpha", "beta", "code")).toBe(
     "/workspace/projects/alpha/changes/beta/code",
   );
-  expect(
-    parseWorkspaceRoute(workspaceHref("alpha", "beta", "activity")),
-  ).toEqual({ projectId: "alpha", changeId: "beta", view: "activity" });
+  expect(parseWorkspaceRoute(workspaceHref("alpha", "beta", "code"))).toEqual({
+    projectId: "alpha",
+    changeId: "beta",
+    view: "code",
+  });
   expect(parseWorkspaceRoute("/workspace/projects/alpha/")).toEqual({
     projectId: "alpha",
     view: "overview",
@@ -22,6 +24,7 @@ test("unknown and incomplete URLs cannot silently select another change", () => 
     "/workspace/alpha",
     "/workspace/projects/alpha/changes/beta",
     "/workspace/projects/alpha/changes/beta/deploy",
+    "/workspace/projects/alpha/changes/beta/activity",
     "/workspace/projects/alpha/changes/beta/code/extra",
     "/other",
   ])

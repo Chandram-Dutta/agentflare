@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { and, asc, eq, getTableColumns, sql } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   projectInput,
@@ -25,6 +25,32 @@ import { runtimeFailure } from "./runtime-errors";
 function userSandboxName(userId: string) {
   // Sandbox SDK names are limited to 63 characters, regardless of user ID length.
   return `user-${createHash("sha256").update(userId).digest("hex").slice(0, 58)}`;
+}
+
+async function runtime(
+  env: Bindings,
+  owner: string,
+  row: { id: string; runtime: string },
+  initialize = false,
+) {
+  if (row.runtime === "computer") {
+    if (!env.Computers || !env.ComputerAuth)
+      throw new HTTPException(503, {
+        message: "The Computer runtime is not configured.",
+      });
+    return env.Computers.get(
+      env.Computers.idFromName(JSON.stringify([owner, row.id])),
+    );
+  }
+  if (!env.Sandboxes)
+    throw new HTTPException(503, {
+      message: "The sandbox runtime is not configured.",
+    });
+  if (initialize) {
+    const { getSandbox } = await import("@cloudflare/sandbox");
+    return getSandbox<ThreadSandbox>(env.Sandboxes, userSandboxName(owner));
+  }
+  return env.Sandboxes.get(env.Sandboxes.idFromName(userSandboxName(owner)));
 }
 
 export const api = new Hono<{
@@ -129,29 +155,35 @@ api.get("/session", async (c) => {
 // Container-to-Worker credential checkpoint. This route deliberately precedes
 // browser authentication: a per-runtime capability, never a browser session,
 // authorizes it. Credential contents are never returned or logged.
-api.post("/codex-checkpoint/:id", bodyLimit({ maxSize: 65536 }), async (c) => {
-  if (!c.env.Sandboxes || !/^[a-f0-9]{64}$/.test(c.req.param("id")))
-    return c.notFound();
-  const token = c.req
-    .header("Authorization")
-    ?.match(/^Bearer ([a-f0-9-]{72})$/)?.[1];
-  if (!token || token.length !== 72)
-    return c.json({ error: "Unauthorized" }, 401);
-  const parsed = z
-    .strictObject({ credentials: z.string().max(32768).nullable() })
-    .safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: "Invalid checkpoint" }, 400);
-  try {
-    const sandbox = c.env.Sandboxes.get(
-      c.env.Sandboxes.idFromString(c.req.param("id")),
-    );
-    if (!(await sandbox.saveCodexCredentials(token, parsed.data.credentials)))
+api.on(
+  "POST",
+  ["/codex-checkpoint/:id", "/computer-auth/:id"],
+  bodyLimit({ maxSize: 65536 }),
+  async (c) => {
+    const namespace = c.req.path.startsWith("/api/computer-auth/")
+      ? c.env.Computers
+      : c.env.Sandboxes;
+    if (!namespace || !/^[a-f0-9]{64}$/.test(c.req.param("id")))
+      return c.notFound();
+    const token = c.req
+      .header("Authorization")
+      ?.match(/^Bearer ([a-f0-9-]{72})$/)?.[1];
+    if (!token || token.length !== 72)
       return c.json({ error: "Unauthorized" }, 401);
-    return c.json({ saved: true });
-  } catch {
-    return c.json({ error: "Checkpoint unavailable" }, 503);
-  }
-});
+    const parsed = z
+      .strictObject({ credentials: z.string().max(32768).nullable() })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "Invalid checkpoint" }, 400);
+    try {
+      const sandbox = namespace.get(namespace.idFromString(c.req.param("id")));
+      if (!(await sandbox.saveCodexCredentials(token, parsed.data.credentials)))
+        return c.json({ error: "Unauthorized" }, 401);
+      return c.json({ saved: true });
+    } catch {
+      return c.json({ error: "Checkpoint unavailable" }, 503);
+    }
+  },
+);
 
 // Empty wake-up notification from the bridge. Read state directly from the
 // owning runtime, never trust a browser-supplied transcript or archive handle.
@@ -231,7 +263,7 @@ const projectFields = {
 
 // Retired runtime records must never be opened in a different sandbox.
 const supportedThread = and(
-  eq(thread.runtime, "user"),
+  inArray(thread.runtime, ["user", "computer"]),
   eq(thread.agent, "codex"),
 );
 
@@ -330,7 +362,10 @@ api.post("/projects/:id/threads", async (c) => {
       ...input.data,
       id: crypto.randomUUID(),
       projectId: owned.id,
-      runtime: "user",
+      runtime:
+        c.env.Computers && c.env.ComputerAuth && c.env.ARTIFACTS
+          ? "computer"
+          : "user",
       createdAt: Date.now(),
     })
     .returning()
@@ -375,7 +410,7 @@ api.patch("/threads/:id", async (c) => {
 api.delete("/threads/:id", async (c) => {
   const db = c.get("db");
   const owned = await db
-    .select({ id: thread.id })
+    .select({ id: thread.id, runtime: thread.runtime })
     .from(thread)
     .innerJoin(project, eq(thread.projectId, project.id))
     .where(
@@ -387,15 +422,8 @@ api.delete("/threads/:id", async (c) => {
     )
     .get();
   if (!owned) return c.notFound();
-  if (!c.env.Sandboxes)
-    return c.json(
-      { error: "Configure the sandbox binding before deleting a thread." },
-      503,
-    );
   try {
-    const sandbox = c.env.Sandboxes.get(
-      c.env.Sandboxes.idFromName(userSandboxName(c.get("user").id)),
-    );
+    const sandbox = await runtime(c.env, c.get("user").id, owned);
     await sandbox.userDelete(owned.id);
   } catch (error) {
     return c.json(runtimeFailure(error, "delete"), 502);
@@ -407,17 +435,36 @@ api.delete("/threads/:id", async (c) => {
 api.get("/activity", async (c) => {
   const owned = await c
     .get("db")
-    .select({ id: thread.id })
+    .select({ id: thread.id, runtime: thread.runtime })
     .from(thread)
     .innerJoin(project, eq(thread.projectId, project.id))
     .where(and(eq(project.ownerId, c.get("user").id), supportedThread));
   if (!owned.length) return c.json({});
-  if (!c.env.Sandboxes) return c.json({ error: "Activity unavailable." }, 503);
   try {
-    const sandbox = c.env.Sandboxes.get(
-      c.env.Sandboxes.idFromName(userSandboxName(c.get("user").id)),
+    const shared = owned.find((row) => row.runtime === "user");
+    const runtimes = [
+      ...(shared ? [shared] : []),
+      ...owned.filter((row) => row.runtime === "computer"),
+    ];
+    const activity = Object.assign(
+      {},
+      ...(await Promise.all(
+        runtimes.map(async (row) => {
+          const sandbox = await runtime(c.env, c.get("user").id, row);
+          const values = await sandbox.userActivity();
+          return Object.fromEntries(
+            owned
+              .filter(
+                (item) =>
+                  item.runtime === row.runtime &&
+                  (row.runtime === "user" || item.id === row.id) &&
+                  values[item.id],
+              )
+              .map((item) => [item.id, values[item.id]]),
+          );
+        }),
+      )),
     );
-    const activity = await sandbox.userActivity();
     return c.json(
       Object.fromEntries(
         owned
@@ -457,7 +504,7 @@ const acpAction = z.discriminatedUnion("type", [
 api.get("/threads/:id/runtime/saved", async (c) => {
   const owned = await c
     .get("db")
-    .select({ id: thread.id })
+    .select({ id: thread.id, runtime: thread.runtime })
     .from(thread)
     .innerJoin(project, eq(thread.projectId, project.id))
     .where(
@@ -469,17 +516,15 @@ api.get("/threads/:id/runtime/saved", async (c) => {
     )
     .get();
   if (!owned) return c.notFound();
-  if (!c.env.Sandboxes) return c.json(null);
-  const sandbox = c.env.Sandboxes.get(
-    c.env.Sandboxes.idFromName(userSandboxName(c.get("user").id)),
-  );
+  if (owned.runtime === "user" && !c.env.Sandboxes) return c.json(null);
+  const sandbox = await runtime(c.env, c.get("user").id, owned);
   return c.json(await sandbox.userSaved(owned.id));
 });
 
 api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
   const owned = await c
     .get("db")
-    .select({ id: thread.id })
+    .select({ id: thread.id, runtime: thread.runtime })
     .from(thread)
     .innerJoin(project, eq(thread.projectId, project.id))
     .where(
@@ -497,16 +542,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
     if (!parsed.success) return c.json({ error: "Invalid ACP action." }, 400);
     action = parsed.data;
   }
-  if (!c.env.Sandboxes)
-    return c.json(
-      { error: "The operator must configure Cloudflare Containers." },
-      503,
-    );
-  const { getSandbox } = await import("@cloudflare/sandbox");
-  const sandbox = getSandbox<ThreadSandbox>(
-    c.env.Sandboxes,
-    userSandboxName(c.get("user").id),
-  );
+  const sandbox = await runtime(c.env, c.get("user").id, owned, true);
   try {
     return c.json(await sandbox.userAcp(owned.id, action));
   } catch (error) {
@@ -530,6 +566,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
     .get("db")
     .select({
       id: thread.id,
+      runtime: thread.runtime,
       repository: project.repository,
     })
     .from(thread)
@@ -551,16 +588,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
       return c.json({ error: "Invalid repository path." }, 400);
     }
   }
-  if (!c.env.Sandboxes)
-    return c.json(
-      { error: "The operator must configure Cloudflare Containers." },
-      503,
-    );
-  const { getSandbox } = await import("@cloudflare/sandbox");
-  const sandbox = getSandbox<ThreadSandbox>(
-    c.env.Sandboxes,
-    userSandboxName(c.get("user").id),
-  );
+  const sandbox = await runtime(c.env, c.get("user").id, owned, true);
   if (operation === "status") return c.json(await sandbox.userStatus(owned.id));
   if (operation === "publish") {
     const parsed = z
@@ -650,6 +678,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
     );
     try {
       const input = {
+        owner: c.get("user").id,
         repository: owned.repository,
         name: c.get("user").name,
         branch: `agentflare/${owned.id}`,

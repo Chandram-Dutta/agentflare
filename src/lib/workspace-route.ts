@@ -1,4 +1,4 @@
-export const changeViews = ["overview", "code", "activity"] as const;
+export const changeViews = ["overview", "code"] as const;
 export type ChangeView = (typeof changeViews)[number];
 export type WorkspaceRoute = {
   projectId?: string;

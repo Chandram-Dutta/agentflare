@@ -7,3 +7,8 @@
 !sandbox/acp/package.json
 !sandbox/acp/package-lock.json
 !sandbox/acp/bridge.mjs
+!sandbox/acp/content.mjs
+!sandbox/acp/auth-checkpoint.mjs
+!sandbox/acp/checkpoint-loop.mjs
+!sandbox/Computer.Dockerfile
+sandbox/acp/node_modules/

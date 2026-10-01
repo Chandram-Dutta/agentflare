@@ -22,7 +22,12 @@ export class ThreadSandbox extends Sandbox<Bindings> {
   userDelete(id: string) {
     return this.shared.delete(id);
   }
-  userInspect(id: string, operation: string, path = "", staged = false) {
+  userInspect(
+    id: string,
+    operation: string,
+    path = "",
+    staged = false,
+  ): Promise<unknown> {
     return this.shared.inspect(id, operation, path, staged);
   }
   userReview(id: string) {

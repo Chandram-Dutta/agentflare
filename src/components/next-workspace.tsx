@@ -5,11 +5,11 @@ import {
   useContext,
   useEffect,
   useState,
+  useTransition,
   useSyncExternalStore,
-  type FormEvent,
   type ReactNode,
 } from "react";
-import Link from "next/link";
+import NextLink, { useLinkStatus } from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { Group, Panel, Separator } from "react-resizable-panels";
@@ -26,7 +26,6 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "./ui/button";
-import { Input } from "./ui/input";
 import {
   Dialog,
   DialogContent,
@@ -42,7 +41,6 @@ import {
   useThreadStore,
 } from "./thread-state";
 import { AcpConversation } from "./acp-conversation";
-import { AcpMessages } from "./acp-messages";
 import { RepositoryInspector } from "./runtime-workspace";
 import { apiRequest } from "@/lib/api-client";
 import {
@@ -55,6 +53,25 @@ import type { Project, Thread, WorkspaceData } from "@/lib/workspace";
 import type { Viewer } from "@/server/auth";
 
 const ReviewContent = createContext<ReactNode>(null);
+
+function LinkProgress() {
+  const { pending } = useLinkStatus();
+  return (
+    <span
+      aria-hidden="true"
+      className={`ml-1 inline-block size-1.5 shrink-0 rounded-full bg-current transition-opacity ${pending ? "animate-pulse opacity-60" : "opacity-0"}`}
+    />
+  );
+}
+
+function Link({ children, ...props }: React.ComponentProps<typeof NextLink>) {
+  return (
+    <NextLink {...props}>
+      {children}
+      <LinkProgress />
+    </NextLink>
+  );
+}
 
 // The route page renders this outlet only after its server-side ownership check.
 // The persistent layout keeps the workspace cache and drafts across routes.
@@ -90,17 +107,18 @@ function WorkspaceShell({
   children: ReactNode;
 }) {
   const router = useRouter();
+  const [navigating, startNavigation] = useTransition();
   const pathname = usePathname();
   const route = parseWorkspaceRoute(pathname);
   const store = useThreadStore();
   const { resolvedTheme, setTheme } = useTheme();
   const [data, setData] = useState<WorkspaceData>();
   const [error, setError] = useState("");
-  const [pending, setPending] = useState(false);
+  const [operation, setOperation] = useState<
+    "creating" | "deleting" | "signing-out"
+  >();
   const [sidebar, setSidebar] = useState(true);
   const [agent, setAgent] = useState(true);
-  const [newChange, setNewChange] = useState(false);
-  const [name, setName] = useState("");
   const [deleting, setDeleting] = useState<Thread>();
   const narrow = useSyncExternalStore(
     subscribeNarrow,
@@ -151,38 +169,38 @@ function WorkspaceShell({
           ],
         },
     );
-    router.push(workspaceHref(saved.id));
+    startNavigation(() => router.push(workspaceHref(saved.id)));
   }
-  async function createChange(event: FormEvent) {
-    event.preventDefault();
-    if (!project || pending) return;
-    setPending(true);
+  async function createChange() {
+    if (!project || operation) return;
+    setOperation("creating");
     setError("");
     try {
       const saved = await apiRequest<Thread>(
         `/projects/${project.id}/threads`,
         "POST",
-        { name, agent: "codex" },
+        { name: `Thread ${crypto.randomUUID().slice(0, 8)}`, agent: "codex" },
       );
       setData(
         (current) =>
           current && { ...current, threads: [...current.threads, saved] },
       );
-      setNewChange(false);
-      setName("");
       setAgent(true);
-      router.push(workspaceHref(project.id, saved.id));
+      setMobilePane("agent");
+      startNavigation(() => router.push(workspaceHref(project.id, saved.id)));
+      await store.ensure(saved.id);
+      await store.start(saved.id);
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Could not create change.",
+        cause instanceof Error ? cause.message : "Could not start thread.",
       );
     } finally {
-      setPending(false);
+      setOperation(undefined);
     }
   }
   async function deleteChange() {
-    if (!deleting || pending) return;
-    setPending(true);
+    if (!deleting || operation) return;
+    setOperation("deleting");
     setError("");
     try {
       await apiRequest(`/threads/${deleting.id}`, "DELETE");
@@ -199,20 +217,22 @@ function WorkspaceShell({
       setDeleting(undefined);
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Could not delete change.",
+        cause instanceof Error ? cause.message : "Could not delete thread.",
       );
     } finally {
-      setPending(false);
+      setOperation(undefined);
     }
   }
   async function signOut() {
-    setPending(true);
+    if (operation) return;
+    setOperation("signing-out");
+    setError("");
     try {
       await apiRequest("/auth/sign-out", "POST", {});
       window.location.reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sign-out failed.");
-      setPending(false);
+      setOperation(undefined);
     }
   }
 
@@ -231,7 +251,9 @@ function WorkspaceShell({
           className="min-w-0 max-w-44 bg-transparent py-1"
           value={project?.id ?? ""}
           onChange={(event) =>
-            router.push(workspaceHref(event.target.value || undefined))
+            startNavigation(() =>
+              router.push(workspaceHref(event.target.value || undefined)),
+            )
           }
         >
           <option value="">Projects</option>
@@ -251,8 +273,8 @@ function WorkspaceShell({
           <Button
             variant="ghost"
             size="icon-sm"
-            aria-label="Toggle changes pane"
-            title="Toggle changes pane"
+            aria-label="Toggle threads pane"
+            title="Toggle threads pane"
             aria-pressed={showSidebar}
             onClick={() =>
               narrow
@@ -294,13 +316,27 @@ function WorkspaceShell({
             size="icon-sm"
             aria-label={`Sign out ${user.name}`}
             title="Sign out"
-            disabled={pending}
+            disabled={Boolean(operation)}
             onClick={signOut}
           >
             <LogOut className="size-4" />
           </Button>
         </div>
       </header>
+      {navigating && (
+        <p role="status" className="border-b px-3 py-1 text-xs">
+          Opening workspace…
+        </p>
+      )}
+      {operation && (
+        <p role="status" className="border-b px-3 py-1 text-xs">
+          {operation === "creating"
+            ? "Creating and starting thread…"
+            : operation === "deleting"
+              ? "Deleting thread…"
+              : "Signing out…"}
+        </p>
+      )}
       {error && (
         <div
           role="alert"
@@ -333,20 +369,18 @@ function WorkspaceShell({
               <Panel id="changes" defaultSize="18%" minSize="150px">
                 <aside
                   className="flex h-full flex-col overflow-auto"
-                  aria-label="Changes"
+                  aria-label="Threads"
                 >
                   <div className="flex h-11 shrink-0 items-center justify-between border-b px-3 text-xs">
-                    <span>{project ? "Changes" : "Projects"}</span>
+                    <span>{project ? "Threads" : "Projects"}</span>
                     {project && (
                       <Button
                         variant="ghost"
                         size="icon-xs"
-                        aria-label="New change"
-                        title="New change"
-                        onClick={() => {
-                          setError("");
-                          setNewChange(true);
-                        }}
+                        aria-label="New thread"
+                        title="New thread"
+                        disabled={Boolean(operation)}
+                        onClick={() => void createChange()}
                       >
                         <Plus className="size-4" />
                       </Button>
@@ -354,7 +388,7 @@ function WorkspaceShell({
                   </div>
                   <nav
                     className="min-h-0 flex-1 space-y-1 overflow-auto p-2"
-                    aria-label={project ? "Project changes" : "Projects"}
+                    aria-label={project ? "Project threads" : "Projects"}
                   >
                     {!project &&
                       data.projects.map((p) => (
@@ -398,7 +432,7 @@ function WorkspaceShell({
                             size="icon-xs"
                             className="mr-1"
                             aria-label={`Delete ${item.name}`}
-                            title="Delete change"
+                            title="Delete thread"
                             onClick={() => {
                               setError("");
                               setDeleting(item);
@@ -410,7 +444,7 @@ function WorkspaceShell({
                       ))}
                     {project && !changes.length && (
                       <p className="px-3 py-4 text-xs text-muted-foreground">
-                        No changes yet.
+                        No threads yet.
                       </p>
                     )}
                   </nav>
@@ -431,7 +465,7 @@ function WorkspaceShell({
               </Panel>
               <Separator
                 className="workspace-divider"
-                aria-label="Resize changes list"
+                aria-label="Resize threads list"
               />
             </>
           )}
@@ -449,7 +483,7 @@ function WorkspaceShell({
                   (route.projectId && !project) ||
                   (route.changeId && !change) ? (
                     <p className="p-6 text-xs">
-                      This change is no longer available. Choose another change.
+                      This thread is no longer available. Choose another thread.
                     </p>
                   ) : change && project ? (
                     <ChangeReview
@@ -475,15 +509,18 @@ function WorkspaceShell({
                       </h1>
                       <p className="mt-4 text-sm leading-6 text-muted-foreground">
                         {route?.changeId || (route?.projectId && !project)
-                          ? "This destination is not available. Choose a project or change from the sidebar."
+                          ? "This destination is not available. Choose a project or thread from the sidebar."
                           : project
-                            ? "Each change has a working branch, an agent conversation, and a code review. Open an existing change or start a new one."
-                            : "Connect a repository, describe a change, and review the work before publishing it to GitHub."}
+                            ? "Start a thread and work back and forth with the agent. Return to the conversation anytime, and review code changes before publishing."
+                            : "Connect a repository, start a thread with the agent, and review code changes before publishing to GitHub."}
                       </p>
                       <div className="mt-6">
                         {project ? (
-                          <Button onClick={() => setNewChange(true)}>
-                            <Plus className="size-4" /> New change
+                          <Button
+                            disabled={Boolean(operation)}
+                            onClick={() => void createChange()}
+                          >
+                            <Plus className="size-4" /> New thread
                           </Button>
                         ) : (
                           <div className="flex items-center gap-2 text-xs">
@@ -522,58 +559,21 @@ function WorkspaceShell({
       <footer className="flex h-7 shrink-0 items-center gap-3 border-t px-3 text-[10px] text-muted-foreground">
         <GitBranch className="size-3" />
         <span className="truncate">
-          {change ? `agentflare/${change.id}` : "No change selected"}
+          {change ? `agentflare/${change.id}` : "No thread selected"}
         </span>
         <span className="ml-auto shrink-0">Development preview</span>
       </footer>
       <Dialog
-        open={newChange}
-        onOpenChange={(value) => {
-          if (!pending) setNewChange(value);
-        }}
-      >
-        <DialogContent>
-          <DialogTitle>New change</DialogTitle>
-          <DialogDescription>
-            Give this piece of work a name. Creating it won’t start a sandbox.
-          </DialogDescription>
-          <form onSubmit={createChange} className="space-y-4">
-            <label className="block text-xs">
-              Change name
-              <Input
-                autoFocus
-                required
-                maxLength={60}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                className="mt-2"
-                placeholder="Validate webhook signatures"
-              />
-            </label>
-            {error && (
-              <p role="alert" className="text-xs text-destructive">
-                {error}
-              </p>
-            )}
-            <DialogFooter>
-              <Button type="submit" disabled={pending || !name.trim()}>
-                {pending ? "Creating…" : "Create change"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-      <Dialog
         open={Boolean(deleting)}
         onOpenChange={(value) => {
-          if (!value && !pending) setDeleting(undefined);
+          if (!value && operation !== "deleting") setDeleting(undefined);
         }}
       >
         <DialogContent>
           <DialogTitle>Delete {deleting?.name}?</DialogTitle>
           <DialogDescription>
             This removes its checkout and saved conversation, including unpushed
-            work. Published GitHub branches and other changes are kept.
+            work. Published GitHub branches and other threads are kept.
           </DialogDescription>
           {error && (
             <p role="alert" className="text-xs text-destructive">
@@ -583,17 +583,17 @@ function WorkspaceShell({
           <DialogFooter>
             <Button
               variant="outline"
-              disabled={pending}
+              disabled={operation === "deleting"}
               onClick={() => setDeleting(undefined)}
             >
               Cancel
             </Button>
             <Button
               variant="destructive"
-              disabled={pending}
+              disabled={operation === "deleting"}
               onClick={deleteChange}
             >
-              {pending ? "Deleting…" : "Delete change"}
+              {operation === "deleting" ? "Deleting…" : "Delete thread"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -618,7 +618,7 @@ function ChangeReview({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <nav
-        aria-label="Change views"
+        aria-label="Thread views"
         className="flex h-11 shrink-0 items-center gap-5 border-b px-4 text-xs"
       >
         {changeViews.map((item) => (
@@ -657,26 +657,10 @@ function ChangeReview({
             />
           </Group>
         </div>
-      ) : view === "activity" ? (
-        <section
-          className="min-h-0 flex-1 overflow-auto p-4 text-xs"
-          aria-label="Agent activity"
-        >
-          {state.snapshot?.messages.length ? (
-            <AcpMessages
-              messages={state.snapshot.messages}
-              threadId={change.id}
-            />
-          ) : (
-            <p className="text-muted-foreground">
-              No recorded agent activity yet. Start the workspace to begin.
-            </p>
-          )}
-        </section>
       ) : (
         <section className="min-h-0 flex-1 overflow-auto p-6 sm:p-8">
           <p className="text-xs text-muted-foreground">
-            Change / <ThreadActivity ids={[change.id]} />
+            Thread / <ThreadActivity ids={[change.id]} />
           </p>
           <h1 className="mt-4 break-words text-xl">{change.name}</h1>
           <dl className="mt-8 space-y-4 text-xs">
@@ -693,7 +677,9 @@ function ChangeReview({
                   ? "Saved conversation · resume to inspect files"
                   : state.runtime?.started
                     ? "Running"
-                    : "Not running"}
+                    : state.pending
+                      ? "Starting…"
+                      : "Not running"}
               </dd>
             </div>
             <div className="border-b pb-3">
@@ -760,7 +746,7 @@ function DeveloperPane({ change }: { change: Thread }) {
               : "Start the workspace when you’re ready to build."}
           </p>
           <p className="mt-3 text-muted-foreground">
-            Codex works on this change’s checkout. GitHub publishing remains a
+            Codex works on this thread’s checkout. GitHub publishing remains a
             separate review action.
           </p>
           {state.error && (

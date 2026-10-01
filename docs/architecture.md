@@ -6,6 +6,45 @@ Agentflare owns account access, workspaces, code review, and publishing. Codex
 owns model and tool execution through an Agent Client Protocol (ACP) adapter.
 There is no browser terminal in the current UI.
 
+## Next: per-thread Computer runtime (preview)
+
+The `next` Worker environment adds `@cloudflare/computer` 0.3.2 and Artifacts.
+New threads use their own Computer Durable Object and container, keyed by account
+and thread. Existing `user` runtime records keep their original sandbox and R2
+backups; removing a binding never redirects a saved thread to a different runtime.
+The sections below describe that existing shared runtime unless noted otherwise.
+
+Computer syncs `/workspace` into the owning Durable Object's SQLite filesystem
+every 30 seconds. This is an explicit pull, **not synchronous durable writes**:
+an unexpected container loss can lose changes since the last successful pull.
+After two minutes without conversation access, an idle agent is quiesced, synced,
+and its repository checkpoint is pushed to a private, thread-scoped Artifacts
+repository before the container is destroyed. Busy agents and failed checkpoints
+prevent intentional shutdown. Processes are restarted, not restored from memory.
+
+Artifacts is a code checkpoint, not GitHub publishing or a deployed preview.
+Checkpoint commits use a separate Git index and do not change the working branch
+or staging area. GitHub still receives only explicit review/publish actions.
+Ignored files and native Codex rollouts persist in Computer, not the Git artifact.
+
+Codex runs with an ephemeral `/run/codex` home. Only its canonical `sessions` and
+`archived_sessions` directories link into `/workspace`; `auth.json` never does.
+A separate account-level Durable Object stores encrypted credentials for new
+thread startup. The old shared runtime's credentials are not migrated; the first
+Computer thread needs sign-in. Native SQLite indexes are rebuilt from rollouts.
+Container replacement does not automatically replay interrupted prompts.
+
+Deletion fences the thread first, destroys its container, removes the scoped
+Artifact repository and clears its durable filesystem. A cleanup failure leaves
+the database row available for deletion retry. Other threads and account login
+are retained. Agents can still read credentials made available inside their own
+container; this is not a security boundary between the agent and its login.
+
+The local integration check uses real computerd/FUSE with Durable Object SQLite
+and replaces the container to verify file/rollout recovery and auth exclusion.
+Cloudflare scheduling, real Artifacts pushes and provider-backed Codex resume
+still require a smoke test on the isolated Next deployment.
+
 ## Components
 
 ```text

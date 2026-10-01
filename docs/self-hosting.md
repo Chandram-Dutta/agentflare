@@ -199,6 +199,30 @@ before building to avoid running both workloads at once.
 
 ## Operations and troubleshooting
 
+### Computer preview on the Next environment
+
+`env.next` adds `Computers` (`ComputerThread`), `ComputerAuth`
+(`ComputerCredentials`) and an `ARTIFACTS` namespace binding. It uses
+`sandbox/Computer.Dockerfile`, pinned to computerd 0.3.2, and a separate Durable
+Object migration. Keep these isolated from the existing production Worker.
+The image needs kernel FUSE; do not substitute the filesystem shim for persistent
+agent sessions. Existing shared-runtime threads still need their R2 credentials.
+
+Run the container-replacement check on a Docker host with FUSE support:
+
+```sh
+docker build -f sandbox/Computer.Dockerfile -t agentflare-computer:test .
+COMPUTER_IMAGE=agentflare-computer:test bun test src/server/computer.test.ts
+```
+
+The test starts and removes disposable privileged local containers, bound only to
+loopback port 19487. Without `COMPUTER_IMAGE`, the ordinary test suite still runs
+the lifecycle/failure/credential tests, but skips the Docker replacement check.
+The Computer tests run in an isolated Bun process because repeated Miniflare
+startup with this larger Worker stalls in the pinned Bun/Miniflare combination.
+
+### Existing runtime
+
 - **Installation setup required:** check D1 binding, canonical origin, GitHub App
   variables, and required Worker secrets in the environment you deployed.
 - **Repository access denied:** verify the user's access, the App installation's

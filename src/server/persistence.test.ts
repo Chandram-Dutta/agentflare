@@ -612,6 +612,110 @@ test("only shared Codex threads are exposed; retired records cannot access a run
   ).toBe(400);
 });
 
+test("Computer threads keep their runtime identity and isolate account/thread dispatch", async () => {
+  const project = await createProject();
+  const existing = await createThread(project.id);
+  const calls: string[] = [];
+  let rejectDelete = true;
+  env.Computers = {
+    idFromName: (name: string) => {
+      calls.push(name);
+      return name;
+    },
+    get: (name: string) => {
+      const [, id] = JSON.parse(name);
+      return {
+        userStatus: async () => ({ started: true }),
+        userSaved: async () => null,
+        userActivity: async () => ({
+          [id]: { status: "running", attention: false },
+          injected: { status: "ready" },
+        }),
+        userDelete: async () => {
+          if (rejectDelete) throw Error("cleanup failed");
+        },
+      };
+    },
+  } as unknown as NonNullable<Bindings["Computers"]>;
+  env.ComputerAuth = {} as NonNullable<Bindings["ComputerAuth"]>;
+  env.ARTIFACTS = {} as NonNullable<Bindings["ARTIFACTS"]>;
+  env.Sandboxes = {
+    idFromName: (name: string) => {
+      calls.push(name);
+      return name;
+    },
+    get: () => ({
+      userSaved: async () => null,
+      userActivity: async () => ({
+        [existing.id]: { status: "ready", attention: false },
+      }),
+    }),
+  } as unknown as NonNullable<Bindings["Sandboxes"]>;
+  try {
+    const first = await createThread(project.id);
+    const second = await createThread(project.id);
+    expect(first.runtime).toBe("computer");
+    expect(second.runtime).toBe("computer");
+    expect(
+      (
+        await request(
+          `/threads/${first.id}/runtime/status`,
+          "GET",
+          undefined,
+          "bob",
+        )
+      ).status,
+    ).toBe(404);
+    expect(calls).toEqual([]);
+    expect(
+      await workspaceRouteExists(env, "alice", {
+        projectId: project.id,
+        changeId: first.id,
+        view: "code",
+      }),
+    ).toBe(true);
+    expect((await request(`/threads/${first.id}/runtime/status`)).status).toBe(
+      200,
+    );
+    expect((await request(`/threads/${second.id}/runtime/status`)).status).toBe(
+      200,
+    );
+    expect(calls).toEqual([
+      JSON.stringify(["alice", first.id]),
+      JSON.stringify(["alice", second.id]),
+    ]);
+    const activity = await (await request("/activity")).json();
+    expect(activity).toEqual({
+      [existing.id]: { status: "ready", attention: false },
+      [first.id]: { status: "running", attention: false },
+      [second.id]: { status: "running", attention: false },
+    });
+    await request(`/threads/${existing.id}/runtime/saved`);
+    expect(calls.at(-1)).toMatch(/^user-/);
+    const computers = env.Computers;
+    delete env.Computers;
+    expect((await request(`/threads/${first.id}/runtime/status`)).status).toBe(
+      503,
+    );
+    expect(calls.at(-1)).toMatch(/^user-/); // Never reinterpret the persisted runtime.
+    env.Computers = computers;
+    expect((await request(`/threads/${first.id}`, "DELETE")).status).toBe(502);
+    expect((await request(`/threads/${first.id}/runtime/status`)).status).toBe(
+      200,
+    );
+    rejectDelete = false;
+    expect((await request(`/threads/${first.id}`, "DELETE")).status).toBe(200);
+    expect((await request(`/threads/${first.id}/runtime/status`)).status).toBe(
+      404,
+    );
+  } finally {
+    delete env.Computers;
+    delete env.ComputerAuth;
+    delete env.ARTIFACTS;
+    delete env.Sandboxes;
+  }
+});
+
 test("activity only exposes owned shared threads and never calls a startup method", async () => {
   const own = await createThread((await createProject()).id);
   const foreign = await createThread((await createProject("bob")).id, "bob");

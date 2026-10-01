@@ -2,11 +2,16 @@ import type {
   D1Database,
   DurableObjectNamespace,
   R2Bucket,
+  Artifacts,
 } from "@cloudflare/workers-types";
 import type { ThreadSandbox } from "./sandbox";
+import type { ComputerThread, ComputerCredentials } from "./computer";
 
 export type Bindings = {
   Sandboxes?: DurableObjectNamespace<ThreadSandbox>;
+  Computers?: DurableObjectNamespace<ComputerThread>;
+  ComputerAuth?: DurableObjectNamespace<ComputerCredentials>;
+  ARTIFACTS?: Artifacts;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   DB?: D1Database;
@@ -55,7 +60,6 @@ export function installationReady(env: Bindings): boolean {
 
 export function githubAccountAllowed(env: Bindings, id: string): boolean {
   return (
-    !(env.ALLOWED_GITHUB_IDS ?? "").trim() ||
-    allowedGitHubIds(env).has(id)
+    !(env.ALLOWED_GITHUB_IDS ?? "").trim() || allowedGitHubIds(env).has(id)
   );
 }
