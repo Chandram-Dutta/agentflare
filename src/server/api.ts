@@ -65,6 +65,12 @@ api.on(["GET", "POST"], "/auth/*", bodyLimit({ maxSize: 8192 }), async (c) => {
   if (!installationReady(c.env))
     return c.json({ error: "Installation setup is required." }, 503);
   const path = c.req.path;
+  // Failed OAuth must never establish or replace an identity. An existing
+  // session can resume installation verification; everyone else signs in again.
+  if (c.req.method === "GET" && path === "/api/auth/error") {
+    const session = await getViewer(c.env, c.req.raw.headers);
+    return c.redirect(session.user ? "/connect/github" : "/?auth=failed", 303);
+  }
   const allowed =
     (c.req.method === "POST" &&
       ["/api/auth/sign-in/social", "/api/auth/sign-out"].includes(path)) ||
