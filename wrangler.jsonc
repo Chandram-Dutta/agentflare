@@ -53,6 +53,8 @@
         "BETTER_AUTH_URL": "https://agentflare.onlychan.xyz",
         "GITHUB_CLIENT_ID": "Iv23liBzGNYd1ZpDKH0e",
         "GITHUB_APP_ID": "5124431",
+        "HOSTED_MODE": "true",
+        "UNLIMITED_GITHUB_IDS": "81961406",
         "ALLOWED_GITHUB_IDS": "81961406"
       },
       "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "agentflare-workspaces" }],

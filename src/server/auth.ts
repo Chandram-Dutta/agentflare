@@ -3,7 +3,12 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { drizzle } from "drizzle-orm/d1";
 import { and, eq } from "drizzle-orm";
 import * as schema from "./db/auth-schema";
-import { allowedGitHubIds, installationReady, type Bindings } from "./env";
+import {
+  allowedGitHubIds,
+  githubAccountAllowed,
+  installationReady,
+  type Bindings,
+} from "./env";
 
 export type Viewer = { id: string; name: string };
 
@@ -30,7 +35,7 @@ export async function getViewer(
       ),
     )
     .get();
-  if (!identity || !allowedGitHubIds(env).has(identity.id))
+  if (!identity || !githubAccountAllowed(env, identity.id))
     return { configured: true, user: null, denied: true };
   return {
     configured: true,
@@ -38,8 +43,25 @@ export async function getViewer(
   };
 }
 
+export async function hasWorkspaceLimits(env: Bindings, userId: string) {
+  if (env.HOSTED_MODE !== "true") return false;
+  const identity = await drizzle(env.DB!)
+    .select({ id: schema.account.accountId })
+    .from(schema.account)
+    .where(
+      and(
+        eq(schema.account.userId, userId),
+        eq(schema.account.providerId, "github"),
+      ),
+    )
+    .get();
+  const exempt = allowedGitHubIds({
+    ALLOWED_GITHUB_IDS: env.UNLIMITED_GITHUB_IDS,
+  });
+  return !identity || !exempt.has(identity.id);
+}
+
 export function createAuth(env: Bindings) {
-  const allowed = allowedGitHubIds(env);
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
     secret: env.BETTER_AUTH_SECRET,
@@ -58,7 +80,7 @@ export function createAuth(env: Bindings) {
       validateUserInfo({ source }) {
         if (
           source.oauth?.providerId !== "github" ||
-          !allowed.has(String(source.oauth.profile?.id))
+          !githubAccountAllowed(env, String(source.oauth.profile?.id))
         ) {
           return {
             error: "access_denied",

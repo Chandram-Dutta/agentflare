@@ -126,8 +126,8 @@ export function LandingPage({
             </a>
           </div>
           <p className="mt-3 text-[11px] text-muted-foreground">
-            Sign in or create an account with GitHub. Access is limited to
-            accounts allowed by this installation.
+            Sign in or create an account with GitHub. Each account has its own
+            private workspace.
           </p>
           {pending && (
             <p role="status" className="mt-3 text-xs text-muted-foreground">
@@ -138,8 +138,8 @@ export function LandingPage({
             <div className="mt-5 border-l-2 border-primary pl-4 text-xs">
               <h2 className="font-normal">Installation setup required</h2>
               <p className="mt-2 text-muted-foreground">
-                Configure D1, a GitHub App, the authentication secret, and
-                allowed GitHub IDs before signing in. See the{" "}
+                Configure D1, a GitHub App, and the authentication secret before
+                signing in. See the{" "}
                 <a
                   href={`${github}#readme`}
                   className="underline underline-offset-4"

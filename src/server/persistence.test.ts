@@ -263,6 +263,40 @@ async function createProject(user = "alice"): Promise<Project> {
   return response.json();
 }
 
+test("saved thread failures expose safe actionable errors with a log reference", async () => {
+  const project = await createProject();
+  const created = (await (
+    await request(`/projects/${project.id}/threads`, "POST", {
+      name: "cleanup",
+      agent: "codex",
+    })
+  ).json()) as Thread;
+  env.Sandboxes = {
+    idFromName: (id: string) => id,
+    get: () => ({
+      userSaved: async () => {
+        throw new Error("This thread's sandbox has been deleted.");
+      },
+    }),
+  } as unknown as NonNullable<Bindings["Sandboxes"]>;
+  try {
+    const response = await request(`/threads/${created.id}/runtime/saved`);
+    expect(response.status).toBe(500);
+    const body = (await response.json()) as {
+      code: string;
+      error: string;
+      reference: string;
+    };
+    expect(body.code).toBe("thread_cleanup_pending");
+    expect(body.error).toContain("Retry deleting");
+    expect(body.reference).toMatch(/^[a-f0-9-]{36}$/);
+    expect(body.error).toContain(body.reference);
+    expect(body.error).not.toContain("database and configuration");
+  } finally {
+    delete env.Sandboxes;
+  }
+});
+
 test("thread deletion checks ownership/origin and waits for sandbox cleanup before removing metadata", async () => {
   const project = await createProject();
   const created = (await (
@@ -354,6 +388,134 @@ async function createThread(
   expect(response.status).toBe(201);
   return response.json();
 }
+
+test("hosted quotas are atomic per owner and per project; deletion frees a thread slot", async () => {
+  env.HOSTED_MODE = "true";
+  env.UNLIMITED_GITHUB_IDS = "101";
+  const addProject = () =>
+    request(
+      "/projects",
+      "POST",
+      { name: "limited", repository: "https://github.com/acme/repo" },
+      "bob",
+    );
+  try {
+    // Exempt owner's existing data must not consume another account's quota.
+    for (let i = 0; i < 3; i++) await createProject("alice");
+    const owner = await createProject("alice");
+    for (let i = 0; i < 3; i++) await createThread(owner.id, "alice");
+    const responses = await Promise.all(Array.from({ length: 6 }, addProject));
+    expect(responses.map((r) => r.status).sort()).toEqual([
+      201, 201, 409, 409, 409, 409,
+    ]);
+    const projects = await Promise.all(
+      responses
+        .filter((r) => r.status === 201)
+        .map((r) => r.json() as Promise<Project>),
+    );
+    const addThread = (id: string) =>
+      request(
+        `/projects/${id}/threads`,
+        "POST",
+        { name: "limited", agent: "codex" },
+        "bob",
+      );
+    const first = await Promise.all(
+      Array.from({ length: 5 }, () => addThread(projects[0].id)),
+    );
+    expect(first.map((r) => r.status).sort()).toEqual([
+      201, 201, 409, 409, 409,
+    ]);
+    expect((await addThread(projects[1].id)).status).toBe(201);
+    expect((await addThread(projects[1].id)).status).toBe(201);
+    expect((await addThread(projects[1].id)).status).toBe(409);
+    const created = (await first
+      .find((r) => r.status === 201)!
+      .json()) as Thread;
+    let fail = true;
+    env.Sandboxes = {
+      idFromName: (id: string) => id,
+      get: () => ({
+        userDelete: async () => {
+          if (fail) throw Error("synthetic failure");
+        },
+      }),
+    } as unknown as NonNullable<Bindings["Sandboxes"]>;
+    expect(
+      (await request(`/threads/${created.id}`, "DELETE", undefined, "bob"))
+        .status,
+    ).toBe(502);
+    expect((await addThread(projects[0].id)).status).toBe(409);
+    fail = false;
+    expect(
+      (await request(`/threads/${created.id}`, "DELETE", undefined, "bob"))
+        .status,
+    ).toBe(200);
+    expect((await addThread(projects[0].id)).status).toBe(201);
+    expect((await addThread(projects[0].id)).status).toBe(409);
+    // A verified GitHub identity grants exemption, not another user's headers.
+    expect((await addThread(owner.id)).status).toBe(404);
+    expect(
+      (
+        await request(
+          "/projects",
+          "POST",
+          {
+            name: "spoof",
+            repository: "https://github.com/acme/repo",
+            email: "alice@example.test",
+          },
+          "bob",
+        )
+      ).status,
+    ).toBe(400);
+  } finally {
+    delete env.HOSTED_MODE;
+    delete env.UNLIMITED_GITHUB_IDS;
+    delete env.Sandboxes;
+  }
+});
+
+test("self hosting is open and uncapped by default; optional admission remains enforced", async () => {
+  const previous = env.ALLOWED_GITHUB_IDS;
+  try {
+    delete env.ALLOWED_GITHUB_IDS;
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(
+      200,
+    );
+    for (let i = 0; i < 3; i++) await createProject("bob");
+    const project = await createProject("bob");
+    for (let i = 0; i < 3; i++) await createThread(project.id, "bob");
+    env.ALLOWED_GITHUB_IDS = "101";
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(
+      403,
+    );
+    env.ALLOWED_GITHUB_IDS = "typo-not-a-github-id";
+    expect((await request("/workspace")).status).toBe(403);
+    env.HOSTED_MODE = "true";
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(
+      200,
+    );
+    // Enabling limits preserves old data but prevents more creation.
+    expect(
+      (
+        await request(
+          "/projects",
+          "POST",
+          { name: "extra", repository: "https://github.com/acme/repo" },
+          "bob",
+        )
+      ).status,
+    ).toBe(409);
+    await env.DB.prepare("DELETE FROM account WHERE user_id = 'bob'").run();
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(
+      403,
+    );
+  } finally {
+    env.ALLOWED_GITHUB_IDS = previous;
+    delete env.HOSTED_MODE;
+  }
+});
 
 test("page session resolution verifies cookies, admission and revocation without exposing tokens", async () => {
   const alice = new Headers({ cookie: cookie() });

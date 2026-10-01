@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import { createHash } from "node:crypto";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
-import { isAPIError } from "better-auth/api";
 import { z } from "zod";
 import { and, asc, eq, getTableColumns, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -11,8 +10,10 @@ import {
   projectUpdate,
   threadInput,
   threadUpdate,
+  type Project,
+  type Thread,
 } from "@/lib/workspace";
-import { createAuth, getViewer } from "./auth";
+import { createAuth, getViewer, hasWorkspaceLimits } from "./auth";
 import { installationReady, type Bindings } from "./env";
 import { account } from "./db/auth-schema";
 import { project, thread } from "./db/workspace-schema";
@@ -21,6 +22,7 @@ import { repositoryPath } from "@/lib/runtime";
 import { promptActionSchema } from "@/lib/acp-content";
 import type { AcpAction } from "@/lib/acp";
 import type { ThreadSandbox } from "./sandbox";
+import { runtimeFailure } from "./runtime-errors";
 
 function userSandboxName(userId: string) {
   // Sandbox SDK names are limited to 63 characters, regardless of user ID length.
@@ -43,20 +45,11 @@ api.use("*", async (c, next) => {
 api.onError((error, c) => {
   if (error instanceof HTTPException)
     return c.json({ error: error.message }, error.status);
-  // Do not log request headers, tokens, or arbitrary exception messages.
-  console.error({
-    event: "api_error",
-    method: c.req.method,
-    path: c.req.path,
-    type: error.name,
-    code: isAPIError(error) ? error.body?.code : undefined,
-    frames: error.stack?.split("\n").filter((line) => /^\s+at /.test(line)),
-  });
   return c.json(
-    {
-      error:
-        "Request failed. Check the installation's database and configuration.",
-    },
+    runtimeFailure(
+      error,
+      c.req.path.includes("/runtime/") ? "load" : "request",
+    ),
     500,
   );
 });
@@ -248,17 +241,35 @@ api.post("/projects", async (c) => {
       { error: "Enter a name and a GitHub repository root URL." },
       400,
     );
-  const result = await c
-    .get("db")
-    .insert(project)
-    .values({
-      ...input.data,
-      id: crypto.randomUUID(),
-      ownerId: c.get("user").id,
-      createdAt: Date.now(),
-    })
-    .returning(projectFields)
-    .get();
+  const ownerId = c.get("user").id;
+  const limited = await hasWorkspaceLimits(c.env, ownerId);
+  // Count and insert in one SQLite statement, not a racing count-then-write.
+  const result = await c.env
+    .DB!.prepare(`
+    INSERT INTO project (id, owner_id, name, repository, created_at)
+    SELECT ?, ?, ?, ?, ?
+    WHERE ? = 0 OR (SELECT count(*) FROM project WHERE owner_id = ?) < 2
+    RETURNING id, name, repository, version, created_at AS createdAt
+  `)
+    .bind(
+      crypto.randomUUID(),
+      ownerId,
+      input.data.name,
+      input.data.repository,
+      Date.now(),
+      Number(limited),
+      ownerId,
+    )
+    .first<Project>();
+  if (!result)
+    return c.json(
+      {
+        error:
+          "Your account is limited to 2 projects. Use an existing project.",
+        code: "project_limit_reached",
+      },
+      409,
+    );
   return c.json(result, 201);
 });
 
@@ -311,17 +322,32 @@ api.post("/projects/:id/threads", async (c) => {
     )
     .get();
   if (!owned) return c.notFound();
-  const result = await db
-    .insert(thread)
-    .values({
-      ...input.data,
-      id: crypto.randomUUID(),
-      projectId: owned.id,
-      runtime: "user",
-      createdAt: Date.now(),
-    })
-    .returning()
-    .get();
+  const limited = await hasWorkspaceLimits(c.env, c.get("user").id);
+  const result = await c.env
+    .DB!.prepare(`
+    INSERT INTO thread (id, project_id, name, agent, runtime, created_at)
+    SELECT ?, ?, ?, 'codex', 'user', ?
+    WHERE ? = 0 OR (SELECT count(*) FROM thread WHERE project_id = ?) < 2
+    RETURNING id, project_id AS projectId, name, agent, runtime, version, created_at AS createdAt
+  `)
+    .bind(
+      crypto.randomUUID(),
+      owned.id,
+      input.data.name,
+      Date.now(),
+      Number(limited),
+      owned.id,
+    )
+    .first<Thread>();
+  if (!result)
+    return c.json(
+      {
+        error:
+          "This project is limited to 2 threads. Delete an unused thread before creating another; deletion removes its unpushed work.",
+        code: "thread_limit_reached",
+      },
+      409,
+    );
   return c.json(result, 201);
 });
 
@@ -384,11 +410,8 @@ api.delete("/threads/:id", async (c) => {
       c.env.Sandboxes.idFromName(userSandboxName(c.get("user").id)),
     );
     await sandbox.userDelete(owned.id);
-  } catch {
-    return c.json(
-      { error: "Sandbox cleanup failed. The thread was kept; retry deletion." },
-      502,
-    );
+  } catch (error) {
+    return c.json(runtimeFailure(error, "delete"), 502);
   }
   await db.delete(thread).where(eq(thread.id, owned.id));
   return c.json({ deleted: true });
@@ -500,41 +523,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
   try {
     return c.json(await sandbox.userAcp(owned.id, action));
   } catch (error) {
-    console.error({
-      event: "acp_request_failed",
-      operation: action?.type ?? "snapshot",
-      type: error instanceof Error ? error.name : "unknown",
-      code:
-        error && typeof error === "object" && "code" in error
-          ? String(error.code)
-              .replace(/[^A-Z_0-9]/g, "")
-              .slice(0, 80)
-          : undefined,
-      frames:
-        error instanceof Error
-          ? error.stack?.split("\n").filter((line) => /^\s+at /.test(line))
-          : undefined,
-    });
-    const safeMessages = [
-      "Start this thread first.",
-      "Codex bridge did not become ready.",
-      "Connect Codex first.",
-      "Stop all running Codex threads before signing out.",
-      "Codex sign-out is in progress.",
-      "Codex sign-out cleanup is pending.",
-    ];
-    const message =
-      error instanceof Error && safeMessages.includes(error.message)
-        ? error.message
-        : undefined;
-    return c.json(
-      {
-        error:
-          message ??
-          "Codex connection failed. Check the installation's runtime logs for acp_request_failed.",
-      },
-      409,
-    );
+    return c.json(runtimeFailure(error, "connect"), 409);
   }
 });
 
@@ -681,20 +670,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
       };
       return c.json(await sandbox.userStart(owned.id, input));
     } catch (error) {
-      const stage =
-        error instanceof Error
-          ? error.message.match(
-              /Workspace startup failed during (checking workspace|checking existing sandbox files|starting container|checking out repository|creating agent session|saving workspace state)\./,
-            )?.[1]
-          : undefined;
-      return c.json(
-        {
-          error: stage
-            ? `Sandbox could not start: failed while ${stage}. Check the installation's runtime logs.`
-            : "Sandbox startup was interrupted before completion. Check the installation's runtime logs.",
-        },
-        502,
-      );
+      return c.json(runtimeFailure(error, "start"), 502);
     }
   }
   try {
@@ -708,13 +684,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
         c.req.query("staged") === "true",
       ),
     );
-  } catch {
-    return c.json(
-      {
-        error:
-          "Cannot read this workspace. It may be stopped, or the file may be missing, binary or too large.",
-      },
-      409,
-    );
+  } catch (error) {
+    return c.json(runtimeFailure(error, "inspect"), 409);
   }
 });

@@ -5,11 +5,30 @@ file/diff view, and Files/Git navigation in resizable panes.
 
 ## Current milestone
 
+### Hosted alpha access
+
+`HOSTED_MODE=true` opens GitHub signup and enforces at most **2 projects per
+account** and **2 threads per project**, including stopped threads. Creation is
+checked atomically in D1; parallel requests cannot exceed the limits. A completed
+thread deletion frees its slot; failed or pending deletion does not. Existing
+over-limit data is preserved, but further creation is blocked.
+
+`UNLIMITED_GITHUB_IDS` is a comma-separated list of numeric GitHub IDs exempt from
+both limits, verified against the signed-in account's linked GitHub identity—not
+a browser-supplied email. This branch's production configuration exempts the
+operator's existing GitHub ID. These are resource-count limits, not compute or
+spending caps; the configured container pool still has its own capacity limit.
+
+Self-hosted installs allow any GitHub account and are uncapped by default.
+Operators can optionally set `ALLOWED_GITHUB_IDS` to make a private installation.
+Hosted mode explicitly opens admission even if an old allowlist remains configured.
+No waitlist is used. Each account still has private projects and its own sandbox.
+
 A persistent, authenticated workspace with an initial Cloudflare Sandbox runtime:
 
 - Next.js App Router structure on vinext/Vite and Cloudflare Workers.
 - TypeScript, Bun, Tailwind, shadcn/ui, and Hono.
-- GitHub sign-in through Better Auth; closed-by-default GitHub account allowlist.
+- GitHub sign-in through Better Auth with an optional operator allowlist.
 - D1/Drizzle projects and threads, private to their owner and saved across reloads.
 - Project tabs, per-project threads, a Codex conversation and a Files/Git stage inspector.
 - Monospace light/dark workspace with Codex conversation UI; no browser terminal.
@@ -205,13 +224,15 @@ and access the network inside its sandbox.
    - `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`: the App's numeric ID and PEM
      private key. Store the PEM in a Worker secret, never source control or a
      container image. `.dockerignore` excludes credentials from the image context.
-   - `ALLOWED_GITHUB_IDS`: comma-separated **numeric GitHub account IDs**, not
-     usernames. Find your ID with `gh api user --jq .id`. No wildcard or open signup.
+   - Optional `ALLOWED_GITHUB_IDS`: leave unset or empty for open GitHub signup.
+     For a private installation, set comma-separated **numeric GitHub account IDs**,
+     not usernames. Find your ID with `gh api user --jq .id`.
 4. Run `bun run db:migrate:local`, start the app, and sign in. Until configured,
    the app shows installation instructions and denies private API access.
 
-The allowlist is checked at OAuth admission and on every private API request.
-Removing an ID blocks its existing sessions too. GitHub App user tokens are governed
+When configured outside hosted mode, the allowlist is checked at OAuth admission
+and on every private API request. Removing an ID blocks its existing sessions too;
+clearing the entire list reopens signup. GitHub App user tokens are governed
 by the app's granted permissions, not OAuth scopes; they are encrypted server-side
 and must never be handed to a sandbox. The browser cannot choose sign-in options
 or retrieve stored OAuth tokens. Starting a thread verifies the signed-in user's
@@ -226,7 +247,7 @@ resources, apply remote migrations and deploy to your account:
 1. Authenticate Wrangler to your Cloudflare account.
 2. Create your own database with `bunx wrangler d1 create agentflare`. Put the
    returned database ID in `wrangler.jsonc`, replacing the local-only zero UUID.
-3. Configure `BETTER_AUTH_URL`, `GITHUB_CLIENT_ID`, `GITHUB_APP_ID` and `ALLOWED_GITHUB_IDS` as Worker
+3. Configure `BETTER_AUTH_URL`, `GITHUB_CLIENT_ID`, `GITHUB_APP_ID` and optionally `ALLOWED_GITHUB_IDS` as Worker
    variables in your Wrangler config. Store `BETTER_AUTH_SECRET` and
    `GITHUB_CLIENT_SECRET` with `bunx wrangler secret put <NAME>`; never in Git.
    Upload the PEM using `bunx wrangler secret put GITHUB_APP_PRIVATE_KEY < /secure/path/app.pem`.
