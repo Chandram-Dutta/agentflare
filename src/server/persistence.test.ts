@@ -14,6 +14,7 @@ import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import type { D1Database } from "@cloudflare/workers-types";
 import { api } from "./api";
 import { getViewer } from "./auth";
+import { workspaceRouteExists } from "./workspace-route";
 import type { Bindings } from "./env";
 import type { Project, Thread, WorkspaceData } from "@/lib/workspace";
 
@@ -120,6 +121,50 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await mf?.dispose();
+});
+
+test("workspace routes enforce account ownership and project/change pairing", async () => {
+  const createProject = async (name: string) =>
+    (await (
+      await request("/projects", "POST", {
+        name,
+        repository: `https://github.com/acme/${name}`,
+      })
+    ).json()) as Project;
+  const first = await createProject("first");
+  const second = await createProject("second");
+  const change = (await (
+    await request(`/projects/${first.id}/threads`, "POST", {
+      name: "change",
+      agent: "codex",
+    })
+  ).json()) as Thread;
+  const route = {
+    projectId: first.id,
+    changeId: change.id,
+    view: "code" as const,
+  };
+  expect(await workspaceRouteExists(env, "alice", route)).toBe(true);
+  expect(await workspaceRouteExists(env, "bob", route)).toBe(false);
+  expect(
+    await workspaceRouteExists(env, "alice", {
+      ...route,
+      projectId: second.id,
+    }),
+  ).toBe(false);
+  expect(
+    await workspaceRouteExists(env, "alice", { ...route, changeId: "missing" }),
+  ).toBe(false);
+  expect(
+    await workspaceRouteExists(env, "alice", {
+      projectId: first.id,
+      view: "overview",
+    }),
+  ).toBe(true);
+  await env.DB.prepare("UPDATE thread SET runtime = 'thread' WHERE id = ?")
+    .bind(change.id)
+    .run();
+  expect(await workspaceRouteExists(env, "alice", route)).toBe(false);
 });
 
 test("runtime endpoints enforce thread ownership and write origin before accessing a sandbox", async () => {
@@ -457,17 +502,23 @@ test("self hosting is open and uncapped by default; optional admission remains e
   const previous = env.ALLOWED_GITHUB_IDS;
   try {
     delete env.ALLOWED_GITHUB_IDS;
-    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(200);
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(
+      200,
+    );
     for (let i = 0; i < 3; i++) await createProject("bob");
     const project = await createProject("bob");
     for (let i = 0; i < 3; i++) await createThread(project.id, "bob");
     env.ALLOWED_GITHUB_IDS = "101";
-    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(403);
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(
+      403,
+    );
     env.ALLOWED_GITHUB_IDS = "typo-not-a-github-id";
     expect((await request("/workspace")).status).toBe(403);
     delete env.ALLOWED_GITHUB_IDS;
     await env.DB.prepare("DELETE FROM account WHERE user_id = 'bob'").run();
-    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(403);
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(
+      403,
+    );
   } finally {
     env.ALLOWED_GITHUB_IDS = previous;
   }

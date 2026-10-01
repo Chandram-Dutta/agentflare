@@ -198,12 +198,15 @@ function RepositoryTree({
   );
 }
 
-function RepositoryInspector({
+export function RepositoryInspector({
   base,
   threadId,
   projectId,
   started,
   hiddenPanes,
+  initialTab = "files",
+  navigationFirst = false,
+  stacked = false,
   ref,
 }: {
   base: string;
@@ -211,7 +214,10 @@ function RepositoryInspector({
   projectId: string;
   started: boolean;
   hiddenPanes: string[];
-  ref: Ref<RepositoryInspectorHandle>;
+  initialTab?: string;
+  navigationFirst?: boolean;
+  stacked?: boolean;
+  ref?: Ref<RepositoryInspectorHandle>;
 }) {
   const { resolvedTheme } = useTheme();
   const themeType = resolvedTheme === "dark" ? "dark" : "light";
@@ -222,7 +228,7 @@ function RepositoryInspector({
   const [review, setReview] = useState<BranchReview | undefined>(
     cached?.review,
   );
-  const [tab, setTab] = useState(cached?.tab ?? "files");
+  const [tab, setTab] = useState(cached?.tab ?? initialTab);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -348,219 +354,224 @@ function RepositoryInspector({
     () => ({ openFile: (file) => void open(file.path, undefined, file) }),
     [open],
   );
-  return (
-    <>
-      <Panel
-        id={`${projectId}-viewer`}
-        defaultSize="32%"
-        minSize="300px"
-        collapsible
-        collapsedSize={0}
-        inert={hiddenPanes.includes("viewer")}
+  const viewer = (
+    <Panel
+      key="viewer"
+      id={`${projectId}-viewer`}
+      defaultSize="32%"
+      minSize="300px"
+      collapsible
+      collapsedSize={0}
+      inert={hiddenPanes.includes("viewer")}
+    >
+      <section
+        className="flex h-full min-w-0 flex-col"
+        aria-label="File and diff view"
       >
-        <section
-          className="flex h-full min-w-0 flex-col"
-          aria-label="File and diff view"
-        >
-          <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b px-3 text-xs">
-            <span className="truncate" title={view?.path}>
-              {view ? `${view.path} / ${view.label}` : "file / diff"}
-            </span>
-            {view && (
-              <button
-                type="button"
-                className="text-muted-foreground hover:text-foreground"
-                aria-label="Close file view"
-                onClick={() => {
-                  selection.current++;
-                  selected.current = undefined;
-                  setView(undefined);
+        <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b px-3 text-xs">
+          <span className="truncate" title={view?.path}>
+            {view ? `${view.path} / ${view.label}` : "file / diff"}
+          </span>
+          {view && (
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close file view"
+              onClick={() => {
+                selection.current++;
+                selected.current = undefined;
+                setView(undefined);
+              }}
+            >
+              close
+            </button>
+          )}
+        </div>
+        {error && (
+          <p role="alert" className="p-3 text-xs text-destructive">
+            {error}
+          </p>
+        )}
+        {pending && (
+          <p role="status" className="p-3 text-xs">
+            loading…
+          </p>
+        )}
+        {view ? (
+          <div className="min-h-0 flex-1 overflow-auto">
+            {view.content !== undefined ? (
+              <RepositoryFileView
+                key={view.navigationId}
+                view={view}
+                content={view.content}
+                themeType={themeType}
+              />
+            ) : view.patch ? (
+              <PatchDiff
+                patch={view.patch}
+                options={{
+                  diffStyle: "unified",
+                  themeType,
+                  overflow: navigationFirst ? "wrap" : "scroll",
                 }}
-              >
-                close
-              </button>
+              />
+            ) : (
+              <p className="p-4 text-xs">No text diff available.</p>
             )}
           </div>
-          {error && (
-            <p role="alert" className="p-3 text-xs text-destructive">
-              {error}
+        ) : (
+          !pending && (
+            <p className="p-4 text-xs text-muted-foreground">
+              Select a file or Git change to review it here.
             </p>
-          )}
-          {pending && (
-            <p role="status" className="p-3 text-xs">
-              loading…
-            </p>
-          )}
-          {view ? (
-            <div className="min-h-0 flex-1 overflow-auto">
-              {view.content !== undefined ? (
-                <RepositoryFileView
-                  key={view.navigationId}
-                  view={view}
-                  content={view.content}
-                  themeType={themeType}
-                />
-              ) : view.patch ? (
-                <PatchDiff
-                  patch={view.patch}
-                  options={{ diffStyle: "unified", themeType }}
-                />
-              ) : (
-                <p className="p-4 text-xs">No text diff available.</p>
-              )}
-            </div>
-          ) : (
-            !pending && (
-              <p className="p-4 text-xs text-muted-foreground">
-                Select a file or Git change to review it here.
-              </p>
-            )
-          )}
-        </section>
-      </Panel>
-      <Separator
-        className="workspace-divider"
-        aria-label="Resize file view and repository navigation"
-      />
-      <Panel
-        id={`${projectId}-navigation`}
-        defaultSize="18%"
-        minSize="230px"
-        collapsible
-        collapsedSize={0}
-        inert={hiddenPanes.includes("navigation")}
+          )
+        )}
+      </section>
+    </Panel>
+  );
+  const navigation = (
+    <Panel
+      key="navigation"
+      id={`${projectId}-navigation`}
+      defaultSize="18%"
+      minSize="230px"
+      collapsible
+      collapsedSize={0}
+      inert={hiddenPanes.includes("navigation")}
+    >
+      <aside
+        className="flex h-full min-w-0 flex-col"
+        aria-label="Thread files and Git stage"
       >
-        <aside
-          className="flex h-full min-w-0 flex-col"
-          aria-label="Thread files and Git stage"
+        <Tabs
+          value={tab}
+          onValueChange={(value) => setTab(String(value))}
+          className="min-h-0 flex-1 gap-0"
         >
-          <Tabs
-            value={tab}
-            onValueChange={(value) => setTab(String(value))}
-            className="min-h-0 flex-1 gap-0"
-          >
-            <div className="flex h-10 shrink-0 items-center justify-between border-b px-1">
-              <TabsList
-                variant="line"
-                aria-label="Thread inspector"
-                className="repository-tabs min-w-0"
-              >
-                <TabsTrigger value="files" aria-label="Files" title="Files">
-                  <Files className="size-3.5" aria-hidden="true" />
-                </TabsTrigger>
-                <TabsTrigger
-                  value="changes"
-                  aria-label="Changes"
-                  title="Changes"
-                >
-                  <FileDiff className="size-3.5" aria-hidden="true" />
-                </TabsTrigger>
-                <TabsTrigger value="git" aria-label="Git" title="Git">
-                  <GitBranch className="size-3.5" aria-hidden="true" />
-                </TabsTrigger>
-              </TabsList>
-              <button
-                type="button"
-                className="mx-2 shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
-                aria-label="Refresh files and changes"
-                title="Refresh files and changes"
-                disabled={!started}
-                onClick={() => setRevision((v) => v + 1)}
-              >
-                <RefreshCw className="size-3.5" />
-              </button>
-            </div>
-            <TabsContent value="files" className="min-h-0 overflow-auto">
-              {started ? (
-                <RepositoryTree
-                  files={files}
-                  open={(path) => void open(path)}
-                />
-              ) : (
-                <p className="p-4 text-xs text-muted-foreground">
-                  Start a sandbox to browse files.
+          <div className="flex h-10 shrink-0 items-center justify-between border-b px-1">
+            <TabsList
+              variant="line"
+              aria-label="Thread inspector"
+              className="repository-tabs min-w-0"
+            >
+              <TabsTrigger value="files" aria-label="Files" title="Files">
+                <Files className="size-3.5" aria-hidden="true" />
+              </TabsTrigger>
+              <TabsTrigger value="changes" aria-label="Changes" title="Changes">
+                <FileDiff className="size-3.5" aria-hidden="true" />
+              </TabsTrigger>
+              <TabsTrigger value="git" aria-label="Git" title="Git">
+                <GitBranch className="size-3.5" aria-hidden="true" />
+              </TabsTrigger>
+            </TabsList>
+            <button
+              type="button"
+              className="mx-2 shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
+              aria-label="Refresh files and changes"
+              title="Refresh files and changes"
+              disabled={!started}
+              onClick={() => setRevision((v) => v + 1)}
+            >
+              <RefreshCw className="size-3.5" />
+            </button>
+          </div>
+          <TabsContent value="files" className="min-h-0 overflow-auto">
+            {started ? (
+              <RepositoryTree files={files} open={(path) => void open(path)} />
+            ) : (
+              <p className="p-4 text-xs text-muted-foreground">
+                Start a sandbox to browse files.
+              </p>
+            )}
+          </TabsContent>
+          <TabsContent value="changes" className="overflow-auto p-3 text-xs">
+            {review ? (
+              <>
+                <p className="mb-2 break-words text-muted-foreground">
+                  {review.branch} → {review.baseBranch}
                 </p>
-              )}
-            </TabsContent>
-            <TabsContent value="changes" className="overflow-auto p-3 text-xs">
-              {review ? (
-                <>
-                  <p className="mb-2 break-words text-muted-foreground">
-                    {review.branch} → {review.baseBranch}
-                  </p>
-                  <p className="mb-3 text-[11px] text-muted-foreground">
-                    All changes since branching, including local commits.
-                    Updates automatically.
-                  </p>
-                  <PublishChanges
-                    base={base}
-                    review={review}
-                    onPublished={() => setRevision((v) => v + 1)}
-                  />
-                  {review.changes.length === 0 && (
-                    <p className="mt-3">No branch changes.</p>
-                  )}
-                  {review.changes.map((change) => (
+                <p className="mb-3 text-[11px] text-muted-foreground">
+                  All changes since branching, including local commits. Updates
+                  automatically.
+                </p>
+                <PublishChanges
+                  base={base}
+                  review={review}
+                  onPublished={() => setRevision((v) => v + 1)}
+                />
+                {review.changes.length === 0 && (
+                  <p className="mt-3">No branch changes.</p>
+                )}
+                {review.changes.map((change) => (
+                  <button
+                    type="button"
+                    key={change.path}
+                    className="block w-full truncate py-1 text-left hover:text-primary"
+                    onClick={() => void open(change.path, "branch")}
+                  >
+                    {change.status} {change.path}
+                  </button>
+                ))}
+              </>
+            ) : (
+              <p>
+                {started
+                  ? "Loading branch changes…"
+                  : "Start a sandbox to review changes."}
+              </p>
+            )}
+          </TabsContent>
+          <TabsContent value="git" className="overflow-auto p-3 text-xs">
+            <p className="mb-3 text-[11px] text-muted-foreground">
+              Local staging and commits are managed by the agent. Updates
+              automatically.
+            </p>
+            {changes.length === 0 && (
+              <p>
+                {started ? "No changes." : "Start a sandbox to inspect Git."}
+              </p>
+            )}
+            {[true, false].map((staged) => (
+              <div key={String(staged)} className="mb-4">
+                <h3 className="mb-2 text-muted-foreground">
+                  {staged ? "staged" : "unstaged / untracked"}
+                </h3>
+                {changes
+                  .filter((change) =>
+                    staged
+                      ? ![" ", "?"].includes(change.index)
+                      : change.worktree !== " ",
+                  )
+                  .map((change) => (
                     <button
                       type="button"
                       key={change.path}
                       className="block w-full truncate py-1 text-left hover:text-primary"
-                      onClick={() => void open(change.path, "branch")}
+                      onClick={() =>
+                        void open(
+                          change.path,
+                          change.index === "?" ? undefined : staged,
+                        )
+                      }
                     >
-                      {change.status} {change.path}
+                      {staged ? change.index : change.worktree} {change.path}
                     </button>
                   ))}
-                </>
-              ) : (
-                <p>
-                  {started
-                    ? "Loading branch changes…"
-                    : "Start a sandbox to review changes."}
-                </p>
-              )}
-            </TabsContent>
-            <TabsContent value="git" className="overflow-auto p-3 text-xs">
-              <p className="mb-3 text-[11px] text-muted-foreground">
-                Local staging and commits are managed by the agent. Updates
-                automatically.
-              </p>
-              {changes.length === 0 && (
-                <p>
-                  {started ? "No changes." : "Start a sandbox to inspect Git."}
-                </p>
-              )}
-              {[true, false].map((staged) => (
-                <div key={String(staged)} className="mb-4">
-                  <h3 className="mb-2 text-muted-foreground">
-                    {staged ? "staged" : "unstaged / untracked"}
-                  </h3>
-                  {changes
-                    .filter((change) =>
-                      staged
-                        ? ![" ", "?"].includes(change.index)
-                        : change.worktree !== " ",
-                    )
-                    .map((change) => (
-                      <button
-                        type="button"
-                        key={change.path}
-                        className="block w-full truncate py-1 text-left hover:text-primary"
-                        onClick={() =>
-                          void open(
-                            change.path,
-                            change.index === "?" ? undefined : staged,
-                          )
-                        }
-                      >
-                        {staged ? change.index : change.worktree} {change.path}
-                      </button>
-                    ))}
-                </div>
-              ))}
-            </TabsContent>
-          </Tabs>
-        </aside>
-      </Panel>
+              </div>
+            ))}
+          </TabsContent>
+        </Tabs>
+      </aside>
+    </Panel>
+  );
+  return (
+    <>
+      {navigationFirst ? navigation : viewer}
+      <Separator
+        className={stacked ? "h-1 w-full bg-border" : "workspace-divider"}
+        aria-label="Resize file view and repository navigation"
+      />
+      {navigationFirst ? viewer : navigation}
     </>
   );
 }
