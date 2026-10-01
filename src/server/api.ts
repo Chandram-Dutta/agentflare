@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import { createHash } from "node:crypto";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
-import { isAPIError } from "better-auth/api";
 import { z } from "zod";
 import { and, asc, eq, getTableColumns, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -21,6 +20,7 @@ import { repositoryPath } from "@/lib/runtime";
 import { promptActionSchema } from "@/lib/acp-content";
 import type { AcpAction } from "@/lib/acp";
 import type { ThreadSandbox } from "./sandbox";
+import { runtimeFailure } from "./runtime-errors";
 
 function userSandboxName(userId: string) {
   // Sandbox SDK names are limited to 63 characters, regardless of user ID length.
@@ -43,20 +43,11 @@ api.use("*", async (c, next) => {
 api.onError((error, c) => {
   if (error instanceof HTTPException)
     return c.json({ error: error.message }, error.status);
-  // Do not log request headers, tokens, or arbitrary exception messages.
-  console.error({
-    event: "api_error",
-    method: c.req.method,
-    path: c.req.path,
-    type: error.name,
-    code: isAPIError(error) ? error.body?.code : undefined,
-    frames: error.stack?.split("\n").filter((line) => /^\s+at /.test(line)),
-  });
   return c.json(
-    {
-      error:
-        "Request failed. Check the installation's database and configuration.",
-    },
+    runtimeFailure(
+      error,
+      c.req.path.includes("/runtime/") ? "load" : "request",
+    ),
     500,
   );
 });
@@ -384,11 +375,8 @@ api.delete("/threads/:id", async (c) => {
       c.env.Sandboxes.idFromName(userSandboxName(c.get("user").id)),
     );
     await sandbox.userDelete(owned.id);
-  } catch {
-    return c.json(
-      { error: "Sandbox cleanup failed. The thread was kept; retry deletion." },
-      502,
-    );
+  } catch (error) {
+    return c.json(runtimeFailure(error, "delete"), 502);
   }
   await db.delete(thread).where(eq(thread.id, owned.id));
   return c.json({ deleted: true });
@@ -500,41 +488,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
   try {
     return c.json(await sandbox.userAcp(owned.id, action));
   } catch (error) {
-    console.error({
-      event: "acp_request_failed",
-      operation: action?.type ?? "snapshot",
-      type: error instanceof Error ? error.name : "unknown",
-      code:
-        error && typeof error === "object" && "code" in error
-          ? String(error.code)
-              .replace(/[^A-Z_0-9]/g, "")
-              .slice(0, 80)
-          : undefined,
-      frames:
-        error instanceof Error
-          ? error.stack?.split("\n").filter((line) => /^\s+at /.test(line))
-          : undefined,
-    });
-    const safeMessages = [
-      "Start this thread first.",
-      "Codex bridge did not become ready.",
-      "Connect Codex first.",
-      "Stop all running Codex threads before signing out.",
-      "Codex sign-out is in progress.",
-      "Codex sign-out cleanup is pending.",
-    ];
-    const message =
-      error instanceof Error && safeMessages.includes(error.message)
-        ? error.message
-        : undefined;
-    return c.json(
-      {
-        error:
-          message ??
-          "Codex connection failed. Check the installation's runtime logs for acp_request_failed.",
-      },
-      409,
-    );
+    return c.json(runtimeFailure(error, "connect"), 409);
   }
 });
 
@@ -681,20 +635,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
       };
       return c.json(await sandbox.userStart(owned.id, input));
     } catch (error) {
-      const stage =
-        error instanceof Error
-          ? error.message.match(
-              /Workspace startup failed during (checking workspace|checking existing sandbox files|starting container|checking out repository|creating agent session|saving workspace state)\./,
-            )?.[1]
-          : undefined;
-      return c.json(
-        {
-          error: stage
-            ? `Sandbox could not start: failed while ${stage}. Check the installation's runtime logs.`
-            : "Sandbox startup was interrupted before completion. Check the installation's runtime logs.",
-        },
-        502,
-      );
+      return c.json(runtimeFailure(error, "start"), 502);
     }
   }
   try {
@@ -708,13 +649,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
         c.req.query("staged") === "true",
       ),
     );
-  } catch {
-    return c.json(
-      {
-        error:
-          "Cannot read this workspace. It may be stopped, or the file may be missing, binary or too large.",
-      },
-      409,
-    );
+  } catch (error) {
+    return c.json(runtimeFailure(error, "inspect"), 409);
   }
 });

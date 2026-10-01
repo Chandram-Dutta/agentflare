@@ -37,8 +37,7 @@ export function installationReady(env: Bindings): boolean {
     !env.BETTER_AUTH_SECRET ||
     env.BETTER_AUTH_SECRET.length < 32 ||
     !env.GITHUB_CLIENT_ID ||
-    !env.GITHUB_CLIENT_SECRET ||
-    allowedGitHubIds(env).size === 0
+    !env.GITHUB_CLIENT_SECRET
   )
     return false;
   try {
@@ -52,4 +51,11 @@ export function installationReady(env: Bindings): boolean {
   } catch {
     return false;
   }
+}
+
+export function githubAccountAllowed(env: Bindings, id: string): boolean {
+  return (
+    !(env.ALLOWED_GITHUB_IDS ?? "").trim() ||
+    allowedGitHubIds(env).has(id)
+  );
 }

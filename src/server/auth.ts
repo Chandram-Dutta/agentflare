@@ -3,7 +3,11 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { drizzle } from "drizzle-orm/d1";
 import { and, eq } from "drizzle-orm";
 import * as schema from "./db/auth-schema";
-import { allowedGitHubIds, installationReady, type Bindings } from "./env";
+import {
+  githubAccountAllowed,
+  installationReady,
+  type Bindings,
+} from "./env";
 
 export type Viewer = { id: string; name: string };
 
@@ -30,7 +34,7 @@ export async function getViewer(
       ),
     )
     .get();
-  if (!identity || !allowedGitHubIds(env).has(identity.id))
+  if (!identity || !githubAccountAllowed(env, identity.id))
     return { configured: true, user: null, denied: true };
   return {
     configured: true,
@@ -39,7 +43,6 @@ export async function getViewer(
 }
 
 export function createAuth(env: Bindings) {
-  const allowed = allowedGitHubIds(env);
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
     secret: env.BETTER_AUTH_SECRET,
@@ -58,7 +61,7 @@ export function createAuth(env: Bindings) {
       validateUserInfo({ source }) {
         if (
           source.oauth?.providerId !== "github" ||
-          !allowed.has(String(source.oauth.profile?.id))
+          !githubAccountAllowed(env, String(source.oauth.profile?.id))
         ) {
           return {
             error: "access_denied",

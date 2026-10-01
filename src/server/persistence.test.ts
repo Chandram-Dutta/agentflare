@@ -263,6 +263,40 @@ async function createProject(user = "alice"): Promise<Project> {
   return response.json();
 }
 
+test("saved thread failures expose safe actionable errors with a log reference", async () => {
+  const project = await createProject();
+  const created = (await (
+    await request(`/projects/${project.id}/threads`, "POST", {
+      name: "cleanup",
+      agent: "codex",
+    })
+  ).json()) as Thread;
+  env.Sandboxes = {
+    idFromName: (id: string) => id,
+    get: () => ({
+      userSaved: async () => {
+        throw new Error("This thread's sandbox has been deleted.");
+      },
+    }),
+  } as unknown as NonNullable<Bindings["Sandboxes"]>;
+  try {
+    const response = await request(`/threads/${created.id}/runtime/saved`);
+    expect(response.status).toBe(500);
+    const body = (await response.json()) as {
+      code: string;
+      error: string;
+      reference: string;
+    };
+    expect(body.code).toBe("thread_cleanup_pending");
+    expect(body.error).toContain("Retry deleting");
+    expect(body.reference).toMatch(/^[a-f0-9-]{36}$/);
+    expect(body.error).toContain(body.reference);
+    expect(body.error).not.toContain("database and configuration");
+  } finally {
+    delete env.Sandboxes;
+  }
+});
+
 test("thread deletion checks ownership/origin and waits for sandbox cleanup before removing metadata", async () => {
   const project = await createProject();
   const created = (await (
@@ -354,6 +388,26 @@ async function createThread(
   expect(response.status).toBe(201);
   return response.json();
 }
+
+test("self hosting is open and uncapped by default; optional admission remains enforced", async () => {
+  const previous = env.ALLOWED_GITHUB_IDS;
+  try {
+    delete env.ALLOWED_GITHUB_IDS;
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(200);
+    for (let i = 0; i < 3; i++) await createProject("bob");
+    const project = await createProject("bob");
+    for (let i = 0; i < 3; i++) await createThread(project.id, "bob");
+    env.ALLOWED_GITHUB_IDS = "101";
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(403);
+    env.ALLOWED_GITHUB_IDS = "typo-not-a-github-id";
+    expect((await request("/workspace")).status).toBe(403);
+    delete env.ALLOWED_GITHUB_IDS;
+    await env.DB.prepare("DELETE FROM account WHERE user_id = 'bob'").run();
+    expect((await request("/workspace", "GET", undefined, "bob")).status).toBe(403);
+  } finally {
+    env.ALLOWED_GITHUB_IDS = previous;
+  }
+});
 
 test("page session resolution verifies cookies, admission and revocation without exposing tokens", async () => {
   const alice = new Headers({ cookie: cookie() });
