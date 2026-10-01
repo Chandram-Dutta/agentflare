@@ -16,6 +16,7 @@ export default async function Home({ searchParams }: PageProps<"/">) {
   return (
     <LandingPage
       configured={session.configured}
+      hosted={env.HOSTED_MODE === "true"}
       initialError={
         session.denied
           ? "This account is no longer allowed on this installation. Contact the operator."

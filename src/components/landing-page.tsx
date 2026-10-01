@@ -11,9 +11,11 @@ const github = "https://github.com/Chandram-Dutta/agentflare";
 
 export function LandingPage({
   configured,
+  hosted = false,
   initialError = "",
 }: {
   configured: boolean;
+  hosted?: boolean;
   initialError?: string;
 }) {
   const { resolvedTheme, setTheme } = useTheme();
@@ -96,7 +98,7 @@ export function LandingPage({
               className="size-1.5 rounded-full bg-primary"
               aria-hidden="true"
             />
-            In development
+            In alpha
           </p>
           <h1
             id="headline"
@@ -129,6 +131,11 @@ export function LandingPage({
             Sign in or create an account with GitHub. Each account has its own
             private workspace.
           </p>
+          {hosted && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Hosted alpha: 2 projects per account · 2 threads per project.
+            </p>
+          )}
           {pending && (
             <p role="status" className="mt-3 text-xs text-muted-foreground">
               Connecting to GitHub…
