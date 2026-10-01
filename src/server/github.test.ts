@@ -1,7 +1,11 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, verify } from "node:crypto";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
-import { repositoryCloneToken, repositoryWriteToken } from "./github";
+import {
+  githubInstallation,
+  repositoryCloneToken,
+  repositoryWriteToken,
+} from "./github";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -14,6 +18,67 @@ const env = {
 };
 let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
 afterEach(() => fetchSpy?.mockRestore());
+
+test("onboarding verifies this user's accessible, unsuspended App installation across pages", async () => {
+  fetchSpy = spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(
+      Response.json({
+        total_count: 101,
+        installations: Array.from({ length: 100 }, () => ({
+          app_id: 999,
+          suspended_at: null,
+        })),
+      }),
+    )
+    .mockResolvedValueOnce(
+      Response.json({
+        total_count: 101,
+        installations: [{ app_id: 123, suspended_at: null }],
+      }),
+    );
+  expect(await githubInstallation(env, "this-user-token")).toEqual({
+    connected: true,
+    installUrl: null,
+  });
+  expect(fetchSpy.mock.calls.map(([url]) => String(url))).toEqual([
+    "https://api.github.com/user/installations?per_page=100&page=1",
+    "https://api.github.com/user/installations?per_page=100&page=2",
+  ]);
+  for (const [, init] of fetchSpy.mock.calls)
+    expect(new Headers(init?.headers).get("Authorization")).toBe(
+      "Bearer this-user-token",
+    );
+});
+
+test("missing or suspended installations lead to this App's installation page, not a claimed installation ID", async () => {
+  fetchSpy = spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(
+      Response.json({
+        total_count: 2,
+        installations: [
+          { app_id: 999, suspended_at: null },
+          { app_id: 123, suspended_at: "2026-10-01" },
+        ],
+      }),
+    )
+    .mockResolvedValueOnce(Response.json({ slug: "self-hosted-app" }));
+  expect(await githubInstallation(env, "user-token")).toEqual({
+    connected: false,
+    installUrl: "https://github.com/apps/self-hosted-app/installations/new",
+  });
+  expect(String(fetchSpy.mock.calls[1][0])).toBe("https://api.github.com/app");
+  expect(
+    new Headers(fetchSpy.mock.calls[1][1]?.headers).get("Authorization"),
+  ).not.toBe("Bearer user-token");
+});
+
+test("GitHub verification failure never grants onboarding access", async () => {
+  fetchSpy = spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    new Response(null, { status: 401 }),
+  );
+  await expect(githubInstallation(env, "expired-token")).rejects.toThrow();
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+});
 
 test("clone credentials require user access, then mint a signed repository-only read token", async () => {
   fetchSpy = spyOn(globalThis, "fetch")

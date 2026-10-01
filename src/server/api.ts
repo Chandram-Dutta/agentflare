@@ -11,7 +11,7 @@ import {
   threadInput,
   threadUpdate,
 } from "@/lib/workspace";
-import { createAuth, getViewer } from "./auth";
+import { createAuth, getViewer, getGitHubConnection } from "./auth";
 import { installationReady, type Bindings } from "./env";
 import { account } from "./db/auth-schema";
 import { project, thread } from "./db/workspace-schema";
@@ -97,7 +97,7 @@ api.on(["GET", "POST"], "/auth/*", bodyLimit({ maxSize: 8192 }), async (c) => {
         headers,
         body: JSON.stringify({
           provider: "github",
-          callbackURL: `${c.env.BETTER_AUTH_URL}/workspace`,
+          callbackURL: `${c.env.BETTER_AUTH_URL}/connect/github`,
           errorCallbackURL: `${c.env.BETTER_AUTH_URL}/?auth=failed`,
           disableRedirect: true,
         }),
@@ -198,6 +198,22 @@ api.use(
     await next();
   },
 );
+
+api.get("/github/connection", async (c) => {
+  try {
+    return c.json(
+      await getGitHubConnection(c.env, c.req.raw.headers, c.get("user").id),
+    );
+  } catch {
+    return c.json(
+      {
+        error:
+          "Could not verify GitHub App access. Retry, or sign in again if your GitHub authorization has expired.",
+      },
+      502,
+    );
+  }
+});
 
 const projectFields = {
   id: project.id,

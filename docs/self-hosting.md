@@ -31,6 +31,16 @@ Choose a canonical HTTPS origin without a trailing slash, then
 | Webhooks | Disabled |
 | Request user authorization during installation | Disabled |
 
+Make the GitHub App **public** if other accounts will use this installation.
+This does not make their repositories public. A private App cannot onboard other
+accounts even when Agentflare itself allows signup.
+
+After GitHub sign-in, Agentflare checks for an accessible, non-suspended
+installation of your App. Users without one are guided to install it in a new
+tab, then return to continue automatically after verification. Organization
+approval requests must be approved first. No setup URL or webhook is required;
+the OAuth callback above remains unchanged.
+
 Generate a client secret and a PEM private key. Install the App on selected
 repositories. Users need both their own repository access and an App installation;
 the App alone does not grant a user access. Approve new installation permissions
