@@ -26,6 +26,7 @@ Choose a canonical HTTPS origin without a trailing slash, then
 | --- | --- |
 | Homepage | Your canonical origin |
 | Callback | `<origin>/api/auth/callback/github` |
+| Setup URL (recommended) | `<origin>/connect/github` |
 | Account permission | Email addresses: read-only |
 | Repository permissions | Contents: read/write; Pull requests: read/write |
 | Webhooks | Disabled |
@@ -38,8 +39,12 @@ accounts even when Agentflare itself allows signup.
 After GitHub sign-in, Agentflare checks for an accessible, non-suspended
 installation of your App. Users without one are guided to install it in a new
 tab, then return to continue automatically after verification. Organization
-approval requests must be approved first. No setup URL or webhook is required;
-the OAuth callback above remains unchanged.
+approval requests must be approved first. The setup URL returns the installation
+tab to verification; without it, return to the original Agentflare tab manually.
+No webhook is required. Keep **Request user authorization (OAuth) during
+installation disabled**: sign-in has already completed OAuth, and starting it
+again from installation has no Agentflare-issued state. Do not use the OAuth
+callback as the setup URL; they serve different flows.
 
 Generate a client secret and a PEM private key. Install the App on selected
 repositories. Users need both their own repository access and an App installation;

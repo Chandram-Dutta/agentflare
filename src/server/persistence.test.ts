@@ -281,20 +281,21 @@ test("GitHub onboarding uses the authenticated account and ignores claimed insta
       )
       .run();
   }
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-    (async (_url, init) => {
-      const auth = new Headers(init?.headers).get("Authorization");
-      if (String(_url).endsWith("/app"))
-        return Response.json({ slug: "test-app" });
-      return Response.json({
-        total_count: auth === "Bearer alice-token" ? 1 : 0,
-        installations:
-          auth === "Bearer alice-token"
-            ? [{ app_id: 123, suspended_at: null }]
-            : [],
-      });
-    }) as typeof fetch,
-  );
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+    _url,
+    init,
+  ) => {
+    const auth = new Headers(init?.headers).get("Authorization");
+    if (String(_url).endsWith("/app"))
+      return Response.json({ slug: "test-app" });
+    return Response.json({
+      total_count: auth === "Bearer alice-token" ? 1 : 0,
+      installations:
+        auth === "Bearer alice-token"
+          ? [{ app_id: 123, suspended_at: null }]
+          : [],
+    });
+  }) as typeof fetch);
   try {
     const anon = await request(
       "/github/connection",
@@ -1067,6 +1068,40 @@ describe("D1-backed workspace authorization", () => {
         })
       ).status,
     ).toBe(404);
+  });
+
+  test("OAuth errors recover only through a valid existing session and never exchange an unbound code", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Unexpected token exchange"),
+    );
+    try {
+      const invalid = await request(
+        "/auth/callback/github?code=unbound-code&state=unknown-state",
+      );
+      expect(invalid.status).toBe(302);
+      expect(invalid.headers.get("location")).toContain("/api/auth/error");
+      expect(fetchSpy).toHaveBeenCalledTimes(0);
+      for (const [sessionCookie, destination] of [
+        [cookie(), "/connect/github"],
+        ["", "/?auth=failed"],
+        [cookie("alice", "forged"), "/?auth=failed"],
+      ]) {
+        const response = await request(
+          "/auth/error?error=state_not_found&callbackURL=https://evil.test&installation_id=123",
+          "GET",
+          undefined,
+          "alice",
+          { cookie: sessionCookie },
+        );
+        expect(response.status).toBe(303);
+        expect(response.headers.get("location")).toBe(destination);
+        expect(response.headers.get("set-cookie")).toBeNull();
+      }
+      expect((await request("/session")).status).toBe(200);
+      expect(fetchSpy).toHaveBeenCalledTimes(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   test("sign-out invalidates the actual session, not just the browser cookie", async () => {
