@@ -3,6 +3,7 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { drizzle } from "drizzle-orm/d1";
 import { and, eq } from "drizzle-orm";
 import * as schema from "./db/auth-schema";
+import { githubInstallation } from "./github";
 import {
   allowedGitHubIds,
   githubAccountAllowed,
@@ -11,6 +12,29 @@ import {
 } from "./env";
 
 export type Viewer = { id: string; name: string };
+
+export async function getGitHubConnection(
+  env: Bindings,
+  headers: Headers,
+  userId: string,
+) {
+  const identity = await drizzle(env.DB!)
+    .select({ id: schema.account.id })
+    .from(schema.account)
+    .where(
+      and(
+        eq(schema.account.userId, userId),
+        eq(schema.account.providerId, "github"),
+      ),
+    )
+    .get();
+  if (!identity) throw new Error("Reconnect your GitHub account.");
+  const token = await createAuth(env).api.getAccessToken({
+    headers,
+    body: { accountId: identity.id },
+  });
+  return githubInstallation(env, token.accessToken);
+}
 
 // Shared by page rendering and API authorization. A cookie alone is not proof
 // of access: verify the database session and the current installation allowlist.

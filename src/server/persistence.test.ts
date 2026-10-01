@@ -4,9 +4,11 @@ import {
   beforeEach,
   describe,
   expect,
+  spyOn,
   test,
 } from "bun:test";
-import { createHmac } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
+import { symmetricEncrypt } from "better-auth/crypto";
 import { readFile } from "node:fs/promises";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -262,6 +264,67 @@ async function createProject(user = "alice"): Promise<Project> {
   expect(response.status).toBe(201);
   return response.json();
 }
+
+test("GitHub onboarding uses the authenticated account and ignores claimed installation IDs", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  env.GITHUB_APP_ID = "123";
+  env.GITHUB_APP_PRIVATE_KEY = privateKey
+    .export({ type: "pkcs8", format: "pem" })
+    .toString();
+  for (const name of ["alice", "bob"]) {
+    await env.DB.prepare(
+      "UPDATE account SET access_token = ? WHERE user_id = ?",
+    )
+      .bind(
+        await symmetricEncrypt({ key: secret, data: `${name}-token` }),
+        name,
+      )
+      .run();
+  }
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+    (async (_url, init) => {
+      const auth = new Headers(init?.headers).get("Authorization");
+      if (String(_url).endsWith("/app"))
+        return Response.json({ slug: "test-app" });
+      return Response.json({
+        total_count: auth === "Bearer alice-token" ? 1 : 0,
+        installations:
+          auth === "Bearer alice-token"
+            ? [{ app_id: 123, suspended_at: null }]
+            : [],
+      });
+    }) as typeof fetch,
+  );
+  try {
+    const anon = await request(
+      "/github/connection",
+      "GET",
+      undefined,
+      "alice",
+      { cookie: "" },
+    );
+    expect(anon.status).toBe(401);
+    expect(fetchSpy).toHaveBeenCalledTimes(0);
+    const alice = await request("/github/connection");
+    expect(alice.status).toBe(200);
+    expect(await alice.json()).toEqual({ connected: true, installUrl: null });
+    const bob = await request(
+      "/github/connection?installation_id=123&user=alice",
+      "GET",
+      undefined,
+      "bob",
+    );
+    expect(bob.status).toBe(200);
+    expect(await bob.json()).toEqual({
+      connected: false,
+      installUrl: "https://github.com/apps/test-app/installations/new",
+    });
+  } finally {
+    fetchSpy.mockRestore();
+    delete env.GITHUB_APP_ID;
+    delete env.GITHUB_APP_PRIVATE_KEY;
+  }
+});
 
 test("saved thread failures expose safe actionable errors with a log reference", async () => {
   const project = await createProject();
