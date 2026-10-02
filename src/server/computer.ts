@@ -143,6 +143,12 @@ export class ComputerThread extends DurableObject<Bindings> {
         ...(snapshot
           ? { containerSnapshot: { id: snapshot.id } }
           : { image: container.images.workspace }),
+        entrypoint: [
+          "/usr/bin/tini",
+          "--",
+          "/bin/bash",
+          "/opt/agentflare/native-workspace.sh",
+        ],
         instance: "standard-1",
         enableInternet: true,
       });
@@ -507,6 +513,7 @@ export class ComputerThread extends DurableObject<Bindings> {
           checkpoint?.snapshot &&
           checkpoint.snapshot.image === this.ctx.container!.images.workspace &&
           Date.now() - checkpoint.snapshot.at < 29 * 86400_000;
+        let restoredNative = false;
         if (recovery) {
           // Crash checkpoints may contain partial writes, but are newer than
           // the last idle backup. Never silently replace them with older files.
@@ -515,10 +522,21 @@ export class ComputerThread extends DurableObject<Bindings> {
           await this.boot(recovery);
           await this.ctx.storage.put("interrupted-turn", true);
         } else if (usableSnapshot) {
-          // Fail closed if startup fails; don't silently roll back or create a
-          // new empty checkout. A later retry uses the matching R2 checkpoint.
-          await this.boot(checkpoint.snapshot);
-        } else {
+          try {
+            await this.boot(checkpoint.snapshot);
+            restoredNative = true;
+          } catch {
+            // The matching R2 archive is the same committed workspace, not an
+            // older revision. Never use this fallback for a newer crash snapshot.
+            console.warn({
+              event: "workspace_snapshot_restore_fallback",
+              workspace: this.ctx.id.toString(),
+            });
+            if (this.ctx.container!.running)
+              await this.ctx.container!.destroy();
+          }
+        }
+        if (!recovery && !restoredNative) {
           await this.boot();
           const archive = await this.env.BACKUP_BUCKET!.get(
             `${checkpoint!.prefix}/workspace.tar.gz`,

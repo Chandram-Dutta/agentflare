@@ -5,6 +5,7 @@ export { ComputerCredentials };
 export class TestComputer extends ComputerThread {
   async exercise(mode: string) {
     const events: string[] = [];
+    const entrypoints: (string[] | undefined)[] = [];
     let version = 1;
     let fault = "";
     let busy = mode === "busy";
@@ -13,7 +14,11 @@ export class TestComputer extends ComputerThread {
     const container = {
       running: true,
       images: { workspace: "test-image" },
-      start: (options: { containerSnapshot?: { id: string } }) => {
+      start: (options: {
+        containerSnapshot?: { id: string };
+        entrypoint?: string[];
+      }) => {
+        entrypoints.push(options.entrypoint);
         events.push(
           options.containerSnapshot
             ? `restore:${options.containerSnapshot.id}`
@@ -21,6 +26,8 @@ export class TestComputer extends ComputerThread {
         );
         if (fault === "boot") throw Error("startup failed");
         container.running = true;
+        if (fault === "snapshot-boot" && options.containerSnapshot)
+          throw Error("snapshot startup failed after partial boot");
       },
       destroy: async () => {
         events.push("destroy");
@@ -210,6 +217,7 @@ export class TestComputer extends ComputerThread {
           "inspect",
           "concurrent",
           "boot-fails",
+          "snapshot-boot-fails",
         ].includes(mode)
       ) {
         container.running = false;
@@ -227,6 +235,7 @@ export class TestComputer extends ComputerThread {
         }
         if (mode === "restore-fails") fault = "restore";
         if (mode === "boot-fails") fault = "boot";
+        if (mode === "snapshot-boot-fails") fault = "snapshot-boot";
         await attempt(async () => {
           if (mode === "message")
             return this.userAcp("thread", {
@@ -250,6 +259,7 @@ export class TestComputer extends ComputerThread {
     fault = "";
     return {
       events,
+      entrypoints,
       before,
       during,
       alarm,

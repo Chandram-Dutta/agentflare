@@ -147,6 +147,9 @@ test("retry keeps the previous checkpoint until successful commit", async () => 
 
 test("native restore precedes agent connect; expired snapshots use R2", async () => {
   const restored = await call("resume");
+  expect(restored.entrypoints).toEqual([
+    ["/usr/bin/tini", "--", "/bin/bash", "/opt/agentflare/native-workspace.sh"],
+  ]);
   expect(restored.events).toEqual([
     "restore:disk-1",
     "lease",
@@ -166,6 +169,22 @@ test("native restore precedes agent connect; expired snapshots use R2", async ()
   ]);
   const updated = await call("image-update");
   expect(updated.events).toEqual(expired.events);
+});
+
+test("failed native checkpoint startup restores matching R2 before agent connect", async () => {
+  const result = await call("snapshot-boot-fails");
+  expect(result.events).toEqual([
+    "restore:disk-1",
+    "destroy",
+    "boot",
+    "lease",
+    "exec",
+    "restore:r2",
+    "ensure",
+    "action:connect",
+  ]);
+  expect(result.saved?.workspace).toBe("running");
+  expect(result.pending).toBeUndefined();
 });
 
 test("interrupted restores stay fenced, without starting an agent or replaying work", async () => {
