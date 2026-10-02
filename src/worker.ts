@@ -3,8 +3,10 @@ import { api } from "./server/api";
 import type { Bindings } from "./server/env";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 export { ThreadSandbox } from "./server/sandbox";
-export { ComputerThread, ComputerCredentials } from "./server/computer";
-export { WorkspaceProxy } from "@cloudflare/computer";
+export {
+  ComputerThread as NativeThread,
+  ComputerCredentials,
+} from "./server/computer";
 
 const worker = {
   fetch(request: Request, env: Bindings, ctx: ExecutionContext) {

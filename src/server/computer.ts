@@ -1,16 +1,16 @@
 import { DurableObject } from "cloudflare:workers";
 import type {
-  Request as WorkerRequest,
+  DurableObjectState,
   Response as WorkerResponse,
 } from "@cloudflare/workers-types";
-import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
-import {
-  CloudflareContainerBackend,
-  withWorkspaceContainer,
-} from "@cloudflare/computer/backends/container";
 import type { Bindings } from "./env";
 import type { AcpAction, AcpActivity, AcpSnapshot } from "@/lib/acp";
-import { createSnapshotTransport, readSnapshotUpdate, type SnapshotCursor, type SnapshotUpdate } from "../../sandbox/acp/snapshot-transport.mjs";
+import {
+  createSnapshotTransport,
+  readSnapshotUpdate,
+  type SnapshotCursor,
+  type SnapshotUpdate,
+} from "../../sandbox/acp/snapshot-transport.mjs";
 import {
   shellArgument as q,
   type RuntimeState,
@@ -79,14 +79,18 @@ type State = RuntimeState & {
   baseBranch: string;
 };
 
+type NativeSnapshot = { id: string; at: number; image: string };
 type Checkpoint = {
   id: string;
   savedAt: string;
   revision: number;
   prefix: string;
-  artifact?: string;
   fingerprint?: string;
+  snapshot?: NativeSnapshot;
 };
+const CHECK_INTERVAL = 30_000;
+const IDLE_LIMIT = 10 * 60_000;
+const KEEPALIVE = 10 * 60_000;
 const emptyConversation: AcpSnapshot = {
   status: "disconnected",
   messages: [],
@@ -99,24 +103,21 @@ const busy = (s: AcpSnapshot) =>
   s.permissions.length > 0 ||
   Boolean(s.login);
 
-export class ComputerThread extends withWorkspaceContainer(
-  class extends DurableObject<Bindings> {},
-) {
-  private backend = new CloudflareContainerBackend({
-    container: () => this,
-    workspace: { binding: "Computers", id: this.ctx.id.toString() },
-    id: "linux",
-    egress: { mode: "direct" },
-    containerEnv: { FUSE_MOUNT: "fuse" },
-  });
-  private computer = new Workspace({
-    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
-    sessionId: this.ctx.id.toString(),
-    backends: [this.backend],
-    artifacts: this.env.ARTIFACTS ? { binding: this.env.ARTIFACTS } : undefined,
-  });
+export class ComputerThread extends DurableObject<Bindings> {
+  constructor(ctx: DurableObjectState, env: Bindings) {
+    super(ctx, env);
+    // A DO restart must not reset the lifetime of a still-working container.
+    if (ctx.container?.running) {
+      void ctx.blockConcurrencyWhile(async () => {
+        await ctx.container!.setInactivityTimeout(KEEPALIVE);
+        if ((await ctx.storage.getAlarm()) === null)
+          await ctx.storage.setAlarm(Date.now() + CHECK_INTERVAL);
+      });
+    }
+  }
   private operations: Promise<unknown> = Promise.resolve();
   private saving = false;
+  private restoring = false;
   private resuming?: Promise<AcpSnapshot>;
   private readTransport = createSnapshotTransport<AcpSnapshot>();
   private bridgeCursor?: SnapshotCursor<AcpSnapshot>;
@@ -125,38 +126,48 @@ export class ComputerThread extends withWorkspaceContainer(
     this.operations = result.catch(() => {});
     return result;
   }
-  __getWorkspaceStub() {
-    return Promise.resolve(this.computer.stub());
-  }
-  fetch(request: WorkerRequest): Promise<WorkerResponse> {
-    return this.backend.handleFetch(
-      request as unknown as Request,
-    ) as unknown as Promise<WorkerResponse>;
-  }
   private async exec(command: string, env?: Record<string, string>) {
-    const handle = await this.computer.runtime.exec(command, {
-      backend: "linux",
-      encoding: "utf8",
-      env,
-      timeoutMs: 120000,
-    });
-    const result = await handle.result();
+    // timeout owns the whole command process group, not just its shell.
+    const handle = await this.ctx.container!.exec(
+      ["timeout", "--kill-after=5", "120", "bash", "-c", command],
+      { env: { HOME: "/root", ...env } },
+    );
+    const result = await handle.output();
     if (result.exitCode !== 0) throw Error("Computer command failed.");
-    if (result.sync.status === "pending" || result.skipped.length > 0)
-      throw Error(
-        "Computer filesystem sync is incomplete. Retry before closing the thread.",
-      );
-    return result.stdout;
+    return new TextDecoder().decode(result.stdout);
   }
-  private async pull() {
-    for await (const block of this.computer.pull("linux")) {
-      if (block.skipped > 0)
-        throw Error(
-          "Computer filesystem sync is incomplete. Retry before closing the thread.",
-        );
+  private async boot(snapshot?: NativeSnapshot) {
+    const container = this.ctx.container!;
+    if (!container.running) {
+      container.start({
+        ...(snapshot
+          ? { containerSnapshot: { id: snapshot.id } }
+          : { image: container.images.workspace }),
+        instance: "standard-1",
+        enableInternet: true,
+      });
     }
+    await container.setInactivityTimeout(KEEPALIVE);
+    // exec waits for startup; /run is an ephemeral mount created by the image.
+    await this.exec(
+      "for i in $(seq 1 100); do test -f /run/agentflare-ready && exit 0; sleep 0.1; done; exit 1",
+    );
+    await this.ctx.storage.put(
+      "runtime-image",
+      snapshot?.image ?? container.images.workspace,
+    );
   }
-  private async uploadArchive(response: Response, key: string) {
+  private async captureSnapshot(name: string): Promise<NativeSnapshot> {
+    const saved = await this.ctx.container!.snapshotContainer({ name });
+    return {
+      id: saved.id,
+      at: Date.now(),
+      image:
+        (await this.ctx.storage.get<string>("runtime-image")) ??
+        this.ctx.container!.images.workspace,
+    };
+  }
+  private async uploadArchive(response: WorkerResponse, key: string) {
     const header = response.headers.get("content-length");
     const length = header === null ? NaN : Number(header);
     if (
@@ -172,7 +183,9 @@ export class ComputerThread extends withWorkspaceContainer(
     // FixedLengthStream also rejects truncated or oversized transfers.
     const stream = new FixedLengthStream(length);
     const abort = new AbortController();
-    const piping = response.body.pipeTo(stream.writable, {
+    const piping = (
+      response.body as unknown as ReadableStream<Uint8Array>
+    ).pipeTo(stream.writable, {
       signal: abort.signal,
     });
     try {
@@ -248,10 +261,10 @@ export class ComputerThread extends withWorkspaceContainer(
   }
   private async lifecycle(): Promise<WorkspaceLifecycle> {
     const phase = await this.ctx.storage.get<WorkspaceLifecycle>("lifecycle");
-    if (this.resuming && phase === "recovering") return "recovering";
+    if (this.restoring && phase === "recovering") return "recovering";
     if (!this.ctx.container?.running)
       return phase === "suspended" ? "suspended" : "failed";
-    if (phase === "suspending" && this.saving) return phase;
+    if (phase === "suspending") return this.saving ? phase : "failed";
     return phase === "failed" || phase === "recovering" || phase === "starting"
       ? "failed"
       : "running";
@@ -269,7 +282,7 @@ export class ComputerThread extends withWorkspaceContainer(
   async userStatus(id: string): Promise<RuntimeState> {
     const state = await this.ctx.storage.get<State>("state");
     return state?.id === id && !(await this.ctx.storage.get("deleted"))
-      ? { ...state, workspace: await this.lifecycle() }
+      ? { ...state, autoResume: true, workspace: await this.lifecycle() }
       : { started: false };
   }
   userStart(id: string, input: UserStart & { owner: string }) {
@@ -285,6 +298,7 @@ export class ComputerThread extends withWorkspaceContainer(
       const startedAt = performance.now();
       try {
         await this.ctx.storage.put("lifecycle", "starting");
+        await this.boot();
         const root = `/workspace/threads/${id}`;
         // A failed clone is disposable until the durable state record is committed.
         await this.exec(
@@ -310,6 +324,7 @@ export class ComputerThread extends withWorkspaceContainer(
           owner: input.owner,
           started: true,
           agent: "codex",
+          autoResume: true,
           repository: input.repository,
           baseBranch: refs[0].slice(7),
           baseSha: refs[1],
@@ -319,6 +334,9 @@ export class ComputerThread extends withWorkspaceContainer(
         await this.dirty();
         await this.ctx.storage.put("last-active", Date.now());
         await this.ctx.storage.setAlarm(Date.now() + 30_000);
+        await this.ensureBridge(state);
+        // Establish recovery before accepting the first user prompt.
+        await this.checkpoint(id, false);
         return state;
       } finally {
         await this.ctx.storage.put(
@@ -336,7 +354,8 @@ export class ComputerThread extends withWorkspaceContainer(
     revision?: string,
   ) {
     const state = await this.state(id);
-    await this.requireRunning();
+    await this.resume(id);
+    await this.ctx.storage.put("last-active", Date.now());
     const encoded = Buffer.from(
       JSON.stringify({
         operation,
@@ -387,15 +406,13 @@ export class ComputerThread extends withWorkspaceContainer(
     });
   }
   private bridge(path: string, method = "GET", body?: unknown) {
-    return this.getWorkspaceContainer().fetchPort(
-      8766,
-      `http://container${path}`,
-      {
+    return this.ctx
+      .container!.getTcpPort(8766)
+      .fetch(`http://container${path}`, {
         method,
         headers: { "Content-Type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      },
-    );
+      });
   }
   private async ensureBridge(state: State) {
     if (
@@ -408,14 +425,13 @@ export class ComputerThread extends withWorkspaceContainer(
     await this.exec(
       "if test -f /run/agentflare-bridge.pid; then pid=$(cat /run/agentflare-bridge.pid); kill -TERM $pid 2>/dev/null || true; for i in $(seq 1 100); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done; if kill -0 $pid 2>/dev/null; then exit 1; fi; rm -f /run/agentflare-bridge.pid; fi",
     );
-    // Pulls already completed in a prior instance live in DO SQLite; exec pushes
-    // that filesystem into a replacement container before spawning anything.
+    this.bridgeCursor = undefined;
     const vault = this.env.ComputerAuth!.get(
       this.env.ComputerAuth!.idFromName(state.owner),
     );
     const credentials = await vault.read();
     // Codex's canonical rollout directories persist; credentials and rebuildable
-    // SQLite indexes stay outside the synced filesystem, even after atomic writes.
+    // SQLite indexes stay in the ephemeral /run mount, never in snapshots.
     await this.exec(
       "mkdir -p /workspace/.codex/sessions /workspace/.codex/archived_sessions /run/codex && chmod 700 /run/codex && ln -sfn /workspace/.codex/sessions /run/codex/sessions && ln -sfn /workspace/.codex/archived_sessions /run/codex/archived_sessions && printf 'cli_auth_credentials_store = \"file\"\\n' > /run/codex/config.toml",
     );
@@ -433,10 +449,10 @@ export class ComputerThread extends withWorkspaceContainer(
       capability: token,
       "auth-epoch": credentials.epoch,
     });
-    // The launcher must finish and drain its pipes. A foreground infinite exec
-    // never completes its sync contract. Health, not a persisted PID, owns readiness.
+    // Health, not a persisted PID, owns readiness. The image's supervisor owns
+    // the bridge after this short launcher exits.
     await this.exec(
-      "nohup bun /opt/agentflare/acp/bridge.mjs </dev/null >/run/agentflare-bridge.log 2>&1 & echo $! >/run/agentflare-bridge.pid",
+      "setsid bun /opt/agentflare/acp/bridge.mjs </dev/null >/run/agentflare-bridge.log 2>&1 & echo $! >/run/agentflare-bridge.pid",
       {
         CODEX_HOME: "/run/codex",
         AGENTFLARE_COMPUTER: "1",
@@ -466,69 +482,89 @@ export class ComputerThread extends withWorkspaceContainer(
     await this.ctx.storage.put("auth-epoch", result.epoch);
     return true;
   }
+  // Called only under the mutation queue. Live disk always wins over a backup.
+  private async resume(id: string, connect = false): Promise<AcpSnapshot> {
+    const state = await this.state(id);
+    if ((await this.lifecycle()) === "running" && !connect)
+      return this.readSnapshot(id);
+    const startedAt = performance.now();
+    this.restoring = true;
+    await this.ctx.storage.put("lifecycle", "recovering");
+    try {
+      const pending = await this.ctx.storage.get<boolean>("restore-pending");
+      if (!this.ctx.container!.running || pending) {
+        const checkpoint = await this.ctx.storage.get<Checkpoint>("checkpoint");
+        const recovery =
+          await this.ctx.storage.get<NativeSnapshot>("live-snapshot");
+        if (!checkpoint && !recovery)
+          throw Error(
+            "No recoverable workspace checkpoint exists. The workspace has not been reset.",
+          );
+        // Mark before boot: an interrupted restore must not become a live disk.
+        await this.ctx.storage.put("restore-pending", true);
+        const usableSnapshot =
+          !pending &&
+          checkpoint?.snapshot &&
+          checkpoint.snapshot.image === this.ctx.container!.images.workspace &&
+          Date.now() - checkpoint.snapshot.at < 29 * 86400_000;
+        if (recovery) {
+          // Crash checkpoints may contain partial writes, but are newer than
+          // the last idle backup. Never silently replace them with older files.
+          if (pending && this.ctx.container!.running)
+            await this.ctx.container!.destroy();
+          await this.boot(recovery);
+          await this.ctx.storage.put("interrupted-turn", true);
+        } else if (usableSnapshot) {
+          // Fail closed if startup fails; don't silently roll back or create a
+          // new empty checkout. A later retry uses the matching R2 checkpoint.
+          await this.boot(checkpoint.snapshot);
+        } else {
+          await this.boot();
+          const archive = await this.env.BACKUP_BUCKET!.get(
+            `${checkpoint!.prefix}/workspace.tar.gz`,
+          );
+          if (!archive) throw Error("Saved workspace restoration failed.");
+          const response = await this.ctx
+            .container!.getTcpPort(8767)
+            .fetch("http://container/workspace-archive", {
+              method: "POST",
+              body: archive.body,
+            });
+          if (!response.ok) throw Error("Saved workspace restoration failed.");
+        }
+        await this.ctx.storage.delete("restore-pending");
+      }
+      await this.ensureBridge(state);
+      const snapshot = await this.fetchSnapshot(id, { type: "connect" });
+      await this.remember(snapshot);
+      await this.ctx.storage.put({
+        lifecycle: "running",
+        connected: true,
+        "last-active": Date.now(),
+      });
+      await this.ctx.storage.setAlarm(Date.now() + CHECK_INTERVAL);
+      return {
+        ...snapshot,
+        workspace: "running",
+        persistence: await this.persistence(),
+      };
+    } catch (error) {
+      await this.ctx.storage.put("lifecycle", "failed");
+      throw error;
+    } finally {
+      this.restoring = false;
+      await this.ctx.storage.put(
+        "resume-ms",
+        Math.round(performance.now() - startedAt),
+      );
+    }
+  }
   userAcp(id: string, action?: AcpAction): Promise<AcpSnapshot> {
     // Reads bypass the mutation/checkpoint queue and never start a container.
     if (!action) return this.readSnapshot(id);
     if (action.type === "connect") {
       if (this.resuming) return this.resuming;
-      this.resuming = this.serial(async () => {
-        const startedAt = performance.now();
-        const state = await this.state(id);
-        const previous =
-          await this.ctx.storage.get<WorkspaceLifecycle>("lifecycle");
-        const restore =
-          (await this.ctx.storage.get<boolean>("restore-pending")) ||
-          previous === "suspended";
-        await this.ctx.storage.put("lifecycle", "recovering");
-        try {
-          // A failed suspend can leave newer files on a live disk than SQLite.
-          // Pull before ensureBridge's exec pushes the synced filesystem back.
-          // If that pull fails, keep the disk untouched and recovery retryable.
-          if (previous === "failed" && this.ctx.container?.running && !restore)
-            await this.pull();
-          await this.ensureBridge(state);
-          if (restore) {
-            const checkpoint =
-              await this.ctx.storage.get<Checkpoint>("checkpoint");
-            if (!checkpoint) throw Error("Saved workspace restoration failed.");
-            await this.ctx.storage.put("restore-pending", true);
-            const archive = await this.env.BACKUP_BUCKET!.get(
-              `${checkpoint.prefix}/workspace.tar.gz`,
-            );
-            if (!archive) throw Error("Saved workspace restoration failed.");
-            const response = await this.getWorkspaceContainer().fetchPort(
-              8766,
-              "http://container/workspace-archive",
-              { method: "POST", body: archive.body as unknown as BodyInit },
-            );
-            if (!response.ok)
-              throw Error("Saved workspace restoration failed.");
-            await this.pull();
-            await this.ctx.storage.delete("restore-pending");
-          }
-          const snapshot = await this.fetchSnapshot(id, action);
-          await this.remember(snapshot);
-          await this.ctx.storage.put({
-            lifecycle: "running",
-            connected: true,
-            "last-active": Date.now(),
-          });
-          await this.ctx.storage.setAlarm(Date.now() + 30_000);
-          return {
-            ...snapshot,
-            workspace: "running" as const,
-            persistence: await this.persistence(),
-          };
-        } catch (error) {
-          await this.ctx.storage.put("lifecycle", "failed");
-          throw error;
-        } finally {
-          await this.ctx.storage.put(
-            "resume-ms",
-            Math.round(performance.now() - startedAt),
-          );
-        }
-      }).finally(() => {
+      this.resuming = this.serial(() => this.resume(id, true)).finally(() => {
         this.resuming = undefined;
       });
       return this.resuming;
@@ -546,13 +582,21 @@ export class ComputerThread extends withWorkspaceContainer(
           await this.checkpoint(id, true);
         return this.readSnapshot(id);
       }
-      await this.requireRunning();
+      // Restore before a new user action, never replay an earlier one.
+      await this.resume(id);
+      if (
+        action.type === "prompt" &&
+        !(await this.ctx.storage.get("checkpoint"))
+      )
+        await this.checkpoint(id, false);
       // Persist the dirty marker before allowing the agent to change anything.
       await this.dirty();
       await this.ctx.storage.put("last-active", Date.now());
       await this.ctx.storage.setAlarm(Date.now() + 1000);
       const snapshot = await this.fetchSnapshot(id, action);
       await this.remember(snapshot);
+      if (action.type === "prompt")
+        await this.ctx.storage.delete("interrupted-turn");
       return {
         ...snapshot,
         workspace: await this.lifecycle(),
@@ -569,7 +613,9 @@ export class ComputerThread extends withWorkspaceContainer(
       action,
     );
     if (!response.ok) throw Error("Codex bridge request failed.");
-    const payload = await response.json() as AcpSnapshot | SnapshotUpdate<AcpSnapshot>;
+    const payload = (await response.json()) as
+      | AcpSnapshot
+      | SnapshotUpdate<AcpSnapshot>;
     // Legacy images still return a plain snapshot during a rolling upgrade.
     if ("status" in payload) return payload;
     const cursor = readSnapshotUpdate(base, payload);
@@ -593,7 +639,9 @@ export class ComputerThread extends withWorkspaceContainer(
       ...snapshot,
       workspace,
       saved: workspace === "suspended" && persistence.state === "saved",
-      interrupted: workspace === "failed",
+      interrupted:
+        workspace === "failed" ||
+        Boolean(await this.ctx.storage.get("interrupted-turn")),
       persistence,
       timings: {
         startupMs: await this.ctx.storage.get<number>("startup-ms"),
@@ -675,15 +723,24 @@ export class ComputerThread extends withWorkspaceContainer(
       let stage = "read-conversation";
       try {
         const state = await this.ctx.storage.get<State>("state");
-        if (!state || (await this.lifecycle()) !== "running") return;
+        if (!state) return;
+        if ((await this.lifecycle()) !== "running")
+          await this.resume(state.id, true);
         const snapshot = await this.fetchSnapshot(state.id);
         stage = "save-conversation";
         await this.remember(snapshot);
         if (busy(snapshot)) {
-          // Incremental recovery only; do not advertise a consistent save while writers run.
           await this.ctx.storage.put("last-work", Date.now());
-          stage = "incremental-sync";
-          await this.pull();
+          // A bounded crash-recovery point for long turns. This is deliberately
+          // not advertised as a consistent idle checkpoint or an R2 backup.
+          const recovery = await this.ctx.storage.get<{ at: number }>(
+            "live-snapshot",
+          );
+          if (!recovery || Date.now() - recovery.at >= 120_000) {
+            stage = "active-snapshot";
+            const saved = await this.captureSnapshot("active");
+            await this.ctx.storage.put("live-snapshot", saved);
+          }
           return;
         }
         const lastActive = Math.max(
@@ -691,12 +748,16 @@ export class ComputerThread extends withWorkspaceContainer(
           (await this.ctx.storage.get<number>("last-work")) ?? 0,
         );
         stage = "checkpoint";
-        await this.checkpoint(state.id, Date.now() - lastActive >= 120_000);
+        await this.checkpoint(state.id, Date.now() - lastActive >= IDLE_LIMIT);
       } catch (error) {
         if (stage !== "checkpoint") await this.recordSaveFailure(stage, error);
       } finally {
-        if (this.ctx.container?.running)
-          await this.ctx.storage.setAlarm(Date.now() + 30_000);
+        if (this.ctx.container?.running) {
+          // Unknown bridge state is not idle. Keep the disk and retry even when
+          // saving or reading activity fails; browser polls are not our lease.
+          await this.ctx.container.setInactivityTimeout(KEEPALIVE);
+          await this.ctx.storage.setAlarm(Date.now() + CHECK_INTERVAL);
+        }
       }
     });
   }
@@ -732,8 +793,6 @@ export class ComputerThread extends withWorkspaceContainer(
       }
       stage = "save-conversation";
       await this.remember(snapshot);
-      stage = "filesystem-sync";
-      await this.pull();
       stage = "fingerprint";
       const previous = await this.ctx.storage.get<Checkpoint>("checkpoint");
       const revision = (await this.ctx.storage.get<number>("revision")) ?? 0;
@@ -741,18 +800,27 @@ export class ComputerThread extends withWorkspaceContainer(
         previous?.fingerprint === (await this.fingerprint()) &&
         previous.revision === revision;
       if (!unchanged) {
-        // Artifact creation writes Git objects. Include those in the archive and
-        // its fingerprint, otherwise every next idle check would look changed.
-        stage = "artifacts";
-        const artifact = await this.checkpointArtifact();
         stage = "fingerprint";
         const fingerprint = await this.fingerprint();
         stage = "create-archive";
-        const response = await this.bridge("/workspace-archive");
+        const response = await this.ctx
+          .container!.getTcpPort(8767)
+          .fetch("http://container/workspace-archive");
         if (!response.ok || !response.body)
           throw Error("Workspace archive failed.");
         stage = "upload-archive";
         await this.uploadArchive(response, `${prefix}/workspace.tar.gz`);
+        stage = "snapshot";
+        const nativeSnapshot = await this.captureSnapshot("checkpoint").catch(
+          () => {
+            // R2 remains a complete recovery source if the preview API is down.
+            console.warn({
+              event: "workspace_snapshot_failed",
+              workspace: this.ctx.id.toString(),
+            });
+            return undefined;
+          },
+        );
         stage = "verify-files";
         if (fingerprint !== (await this.fingerprint()))
           throw Error(
@@ -768,7 +836,7 @@ export class ComputerThread extends withWorkspaceContainer(
           prefix,
           savedAt: new Date().toISOString(),
           revision,
-          artifact,
+          snapshot: nativeSnapshot,
           fingerprint,
         };
         const obsolete = await this.ctx.storage.get<Checkpoint>(
@@ -777,6 +845,7 @@ export class ComputerThread extends withWorkspaceContainer(
         stage = "commit-checkpoint";
         await this.ctx.storage.put({
           checkpoint,
+          "live-snapshot": null,
           ...(previous ? { "previous-checkpoint": previous } : {}),
         });
         if (obsolete)
@@ -784,24 +853,42 @@ export class ComputerThread extends withWorkspaceContainer(
             `${obsolete.prefix}/workspace.tar.gz`,
             `${obsolete.prefix}/conversation.json`,
           ]).catch(() => {});
+      } else if (suspend && previous) {
+        // Preserve installed tools and caches outside /workspace at suspension,
+        // even if repository files have not changed since the last R2 backup.
+        const nativeSnapshot = await this.captureSnapshot("suspend").catch(
+          () => undefined,
+        );
+        if (previous.fingerprint !== (await this.fingerprint()))
+          throw Error(
+            "Workspace changed while saving. Retry when writers are idle.",
+          );
+        await this.ctx.storage.put("checkpoint", {
+          ...previous,
+          snapshot: nativeSnapshot,
+        });
       }
       committed = true;
+      await this.ctx.storage.delete("live-snapshot");
       await this.ctx.storage.delete("checkpoint-error");
       if (suspend) {
         stage = "stop-container";
-        await this.computer.close();
         await this.ctx.container!.destroy();
         await this.ctx.storage.put("lifecycle", "suspended");
         await this.ctx.storage.deleteAlarm();
       }
     } catch (error) {
       await this.recordSaveFailure(stage, error);
-      // A failed final save may have stopped Codex. Keep the disk, require explicit recovery.
-      if (suspend)
+      // Do not strand a stopped agent after an automatic suspend failed.
+      // Reconnect its saved session on the surviving disk, never resend a turn.
+      if (suspend) {
         await this.ctx.storage.put(
           "lifecycle",
           quiesced ? "failed" : "running",
         );
+        if (quiesced && this.ctx.container?.running)
+          await this.resume(id, true).catch(() => {});
+      }
       throw error;
     } finally {
       this.saving = false;
@@ -818,35 +905,13 @@ export class ComputerThread extends withWorkspaceContainer(
     }
   }
   private async fingerprint() {
-    const response = await this.bridge("/workspace-archive", "HEAD");
+    const response = await this.ctx
+      .container!.getTcpPort(8767)
+      .fetch("http://container/workspace-archive", { method: "HEAD" });
     const fingerprint = response.headers.get("X-Workspace-Fingerprint");
     if (!response.ok || !fingerprint || !/^[a-f0-9]{64}$/.test(fingerprint))
       throw Error("Workspace fingerprint is unavailable.");
     return fingerprint;
-  }
-  private async checkpointArtifact() {
-    if (!this.env.ARTIFACTS) return;
-    const state = (await this.ctx.storage.get<State>("state"))!;
-    let repo;
-    try {
-      repo = await this.computer.artifacts.get("code");
-    } catch (error) {
-      if ((error as { code?: string }).code !== "NOT_FOUND") throw error;
-      repo = await this.computer.artifacts.create("code");
-    }
-    const { token } = await this.computer.artifacts.createToken(
-      "code",
-      "write",
-      300,
-    );
-    // Uses a separate index so checkpointing never stages or commits the user's
-    // working branch. Only repository files go to Artifacts, never CODEX_HOME.
-    const root = `/workspace/threads/${state.id}/repo`;
-    const sha = await this.exec(
-      `cd ${q(root)} && GIT_INDEX_FILE=/tmp/checkpoint-index git read-tree HEAD && GIT_INDEX_FILE=/tmp/checkpoint-index git add -A && tree=$(GIT_INDEX_FILE=/tmp/checkpoint-index git write-tree) && commit=$(printf 'Agentflare checkpoint\\n' | git commit-tree "$tree" -p HEAD) && git -c credential.helper= -c http.extraHeader="Authorization: Bearer $ARTIFACT_TOKEN" push ${q(repo.remote)} "$commit:refs/heads/checkpoint-${Date.now()}" && printf %s "$commit"`,
-      { ARTIFACT_TOKEN: token, GIT_TERMINAL_PROMPT: "0" },
-    );
-    return sha.trim();
   }
   userDelete(id: string) {
     return this.serial(async () => {
@@ -854,9 +919,10 @@ export class ComputerThread extends withWorkspaceContainer(
       if (state && state.id !== id) throw Error("Thread ownership mismatch.");
       await this.ctx.storage.put("deleted", true);
       await this.ctx.storage.deleteAlarm();
-      await this.computer.close();
       if (this.ctx.container?.running) await this.ctx.container.destroy();
-      if (this.env.ARTIFACTS) await this.computer.artifacts.delete("code");
+      // Cleanup repositories left by the previous runtime, not part of saving.
+      if (this.env.ARTIFACTS)
+        await this.env.ARTIFACTS.delete(`${this.ctx.id}__code`);
       if (this.env.BACKUP_BUCKET) {
         let objects;
         do {

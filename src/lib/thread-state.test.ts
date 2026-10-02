@@ -31,6 +31,53 @@ function storeWith(
   }) as typeof apiRequest);
 }
 
+test("a message restores a sleeping native workspace once and preserves the draft on failure", async () => {
+  const response = deferred<AcpSnapshot>();
+  const calls: string[] = [];
+  const store = storeWith(async (_path, method) => {
+    calls.push(method ?? "GET");
+    return response.promise;
+  });
+  store.update("a", {
+    runtime: { ...runtime, autoResume: true },
+    snapshot: { ...ready, saved: true, workspace: "suspended" },
+    draft: "continue",
+  });
+  const sending = store.action("a", {
+    type: "prompt",
+    text: "continue",
+    requestId: "new-turn",
+  });
+  expect(store.get("a").snapshot?.workspace).toBe("recovering");
+  expect(store.get("a").draft).toBe("continue");
+  response.resolve({ ...ready, workspace: "running" });
+  expect(await sending).toBe(true);
+  expect(calls).toEqual(["POST"]);
+  expect(store.get("a").draft).toBe("");
+
+  const failedCalls: string[] = [];
+  const failed = storeWith(async (_path, method) => {
+    failedCalls.push(method ?? "GET");
+    if (method === "POST") throw Error("Restore failed");
+    return { ...ready, workspace: "failed" };
+  });
+  failed.update("a", {
+    runtime: { ...runtime, autoResume: true },
+    snapshot: { ...ready, saved: true, workspace: "suspended" },
+    draft: "continue",
+  });
+  expect(
+    await failed.action("a", {
+      type: "prompt",
+      text: "continue",
+      requestId: "new-turn",
+    }),
+  ).toBe(false);
+  expect(failedCalls).toEqual(["POST", "GET"]);
+  expect(failed.get("a").snapshot?.workspace).toBe("failed");
+  expect(failed.get("a").draft).toBe("continue");
+});
+
 test("accepted rich sends clear submitted attachments and preserve newer attachments", async () => {
   const response = deferred<AcpSnapshot>();
   const store = storeWith(async () => response.promise);

@@ -681,9 +681,10 @@ function WorkspaceShell({
                         const current = store.get(change.id);
                         if (
                           current.pending ||
-                          current.snapshot?.saved ||
-                          (current.snapshot?.workspace &&
-                            current.snapshot.workspace !== "running") ||
+                          (!current.runtime?.autoResume &&
+                            (current.snapshot?.saved ||
+                              (current.snapshot?.workspace &&
+                                current.snapshot.workspace !== "running"))) ||
                           current.snapshot?.status !== "ready"
                         ) {
                           throw new Error(
@@ -960,9 +961,10 @@ function ChangeReview({
               started={Boolean(
                 state.hydrated &&
                   state.runtime?.started &&
-                  !state.snapshot?.saved &&
-                  (!state.snapshot?.workspace ||
-                    state.snapshot.workspace === "running") &&
+                  (state.runtime.autoResume ||
+                    (!state.snapshot?.saved &&
+                      (!state.snapshot?.workspace ||
+                        state.snapshot.workspace === "running"))) &&
                   state.snapshot?.status !== "connecting",
               )}
             />

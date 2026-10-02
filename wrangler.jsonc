@@ -41,6 +41,11 @@
         {
           "tag": "v2-computer",
           "new_sqlite_classes": ["ComputerThread", "ComputerCredentials"]
+        },
+        {
+          "tag": "v3-native-runtime",
+          "new_sqlite_classes": ["NativeThread"],
+          "deleted_classes": ["ComputerThread"]
         }
       ],
       "containers": [
@@ -51,17 +56,20 @@
           "max_instances": 2
         },
         {
-          "class_name": "ComputerThread",
-          "image": "./sandbox/Computer.Dockerfile",
-          "image_build_context": ".",
-          "instance_type": "standard-1",
-          "max_instances": 2
+          "class_name": "NativeThread",
+          "scheduling_policy": "durable_object",
+          "images": {
+            "workspace": {
+              "dockerfile": "./sandbox/Computer.Dockerfile",
+              "build_context": "."
+            }
+          }
         }
       ],
       "durable_objects": {
         "bindings": [
           { "name": "Sandboxes", "class_name": "ThreadSandbox" },
-          { "name": "Computers", "class_name": "ComputerThread" },
+          { "name": "Computers", "class_name": "NativeThread" },
           { "name": "ComputerAuth", "class_name": "ComputerCredentials" }
         ]
       },

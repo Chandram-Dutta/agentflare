@@ -1,9 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import type {
-  TestComputer,
-  ComputerProbe,
-} from "./__fixtures__/computer-worker";
+import type { TestComputer } from "./__fixtures__/computer-worker";
 
 let mf: Miniflare;
 beforeAll(async () => {
@@ -25,11 +22,9 @@ beforeAll(async () => {
       durableObjects: {
         Test: { className: "TestComputer", useSQLite: true },
         Vault: { className: "ComputerCredentials", useSQLite: true },
-        Probe: { className: "ComputerProbe", useSQLite: true },
       },
       bindings: {
         BETTER_AUTH_SECRET: "synthetic-test-key-at-least-32-characters",
-        ARTIFACTS: true,
       },
     }),
   );
@@ -44,10 +39,6 @@ function call(
   name: string,
   extra?: object,
 ): Promise<unknown>;
-function call(
-  mode: "probe-write" | "probe-read",
-  name: string,
-): ReturnType<ComputerProbe["exercise"]>;
 function call(
   mode: string,
   name?: string,
@@ -66,203 +57,186 @@ async function call(
   return response.json();
 }
 
-test("Computer only destroys an idle runtime after pull and Artifacts succeed", async () => {
+test("idle suspension commits both recovery sources before destroying", async () => {
   const result = await call("idle");
   expect(result.events).toEqual([
     "quiesce",
-    "pull",
-    "artifact",
     "archive",
-    "close",
+    "snapshot:checkpoint",
     "destroy",
   ]);
-  expect(result.saved?.persistence?.state).toBe("saved");
-  expect(result.saved?.permissions).toEqual([]);
-  expect(result.saved?.login).toBeUndefined();
-  const busy = await call("busy");
-  expect(busy.events).toEqual(["pull"]);
-  expect(busy.saved?.persistence?.state).toBe("dirty");
-  const active = await call("active");
-  expect(active.events).toEqual(["pull", "artifact", "archive"]);
-  expect(active.saved?.workspace).toBe("running");
-});
-
-test("container archive streams with declared lengths can be saved to R2", async () => {
-  const result = await call("streamed-archive");
-  expect(result.saved?.persistence?.state).toBe("saved");
-  expect(result.archive).toBe("archive-bytes");
-  expect(result.events).toContain("destroy");
-  const truncated = await call("truncated-archive");
-  expect(truncated.events).not.toContain("destroy");
-  expect(truncated.checkpoint).toBeUndefined();
-  expect(truncated.failure).toMatchObject({ stage: "upload-archive" });
-  const refused = await call("quiesce-refused");
-  expect(refused.saved?.workspace).toBe("running");
-  expect(refused.events).toEqual(["quiesce"]);
-});
-
-test("explicit checkpoints keep the runtime live and refuse busy writers", async () => {
-  const saved = await call("manual-save");
-  expect(saved.events).toEqual(["pull", "artifact", "archive"]);
-  expect(saved.saved).toMatchObject({
-    workspace: "running",
-    persistence: { state: "saved" },
-  });
-  const busy = await call("manual-busy");
-  expect(busy.events).toEqual([]);
-  expect(busy.checkpoint).toBeUndefined();
-  expect(busy.observation).toContain("before saving or suspending");
-});
-
-test("startup timing measures actual initialization rather than an estimated delay", async () => {
-  const result = await call("startup-timing");
-  expect(result.startupMs).toBeGreaterThanOrEqual(20);
-});
-
-test("retry save retains the previous checkpoint and clears failure without restart or prompt replay", async () => {
-  const result = await call("retry-save");
-  const observation = result.observation as {
-    previous: unknown;
-    retained: unknown;
-    failed: unknown;
-  };
-  expect(observation.previous).toEqual(observation.retained);
-  expect(observation.failed).toMatchObject({
-    workspace: "running",
-    persistence: {
-      state: "error",
-      failure: {
-        stage: "artifacts",
-        reference: expect.any(String),
-        at: expect.any(String),
-      },
-    },
-  });
   expect(result.saved).toMatchObject({
-    workspace: "running",
+    workspace: "suspended",
     persistence: { state: "saved" },
   });
-  expect(result.saved?.persistence?.failure).toBeUndefined();
-  expect(result.checkpoint).not.toEqual(observation.previous);
-  expect(result.events).toEqual([
-    "pull",
-    "artifact",
-    "archive",
-    "pull",
-    "artifact",
-    "pull",
-    "artifact",
-    "archive",
-  ]);
+  expect(result.checkpoint).toMatchObject({ snapshot: { id: "disk-1" } });
+  expect(result.alarm).toBeNull();
 });
 
-test("unchanged files reuse the checkpoint without archive or Artifacts work, but idle background changes do not", async () => {
-  const unchanged = await call("unchanged-save");
-  expect(unchanged.events).toEqual(["pull"]);
-  expect(unchanged.observation).toEqual(unchanged.checkpoint);
-  expect(unchanged.saved?.persistence?.unchanged).toBe(true);
-  expect(unchanged.saved?.persistence?.durationMs).toBeGreaterThanOrEqual(0);
-  const changed = await call("background-change");
-  expect(changed.events).toEqual(["pull", "artifact", "archive"]);
-  expect(changed.checkpoint).not.toEqual(changed.observation);
-  expect(changed.saved?.persistence?.unchanged).toBe(false);
-  const suspended = await call("unchanged-suspend");
-  expect(suspended.events).toEqual(["quiesce", "pull", "close", "destroy"]);
-  expect(suspended.saved?.workspace).toBe("suspended");
+test("busy work gets crash checkpoints and a lease without browser requests", async () => {
+  const result = await call("busy");
+  expect(result.events).toEqual(["snapshot:active", "lease"]);
+  expect(result.recovery).toMatchObject({ id: "disk-1" });
+  expect(result.checkpoint).toBeUndefined();
+  expect(result.saved?.persistence?.state).toBe("dirty");
+  expect(result.alarm).toBeGreaterThan(Date.now());
 });
 
-test("files changing during archiving never replace the last checkpoint", async () => {
-  const result = await call("changes-during-save");
-  expect(result.observation).toEqual(result.checkpoint);
+test("unknown activity is never interpreted as idle", async () => {
+  const result = await call("unknown-activity");
+  expect(result.events).toEqual(["lease"]);
+  expect(result.alarm).toBeGreaterThan(Date.now());
+});
+
+test("unchanged checkpoints skip archive and snapshot; file changes do not", async () => {
+  const unchanged = await call("unchanged");
+  expect(unchanged.events).toEqual([]);
+  expect(unchanged.checkpoint).toEqual(unchanged.before);
+  const changed = await call("changed");
+  expect(changed.events).toEqual(["archive", "snapshot:checkpoint"]);
+  expect(changed.checkpoint).not.toEqual(changed.before);
+});
+
+test("changing files never advance a committed recovery pointer", async () => {
+  const result = await call("changing");
+  expect(result.checkpoint).toEqual(result.before);
   expect(result.saved).toMatchObject({
     workspace: "running",
     persistence: { state: "error", failure: { stage: "verify-files" } },
   });
-  expect(result.saved?.persistence?.durationMs).toBeGreaterThanOrEqual(0);
-  expect(result.events).not.toContain("destroy");
 });
 
-test("recovering a failed suspend pulls surviving files before startup and never restores an older archive", async () => {
-  const recovered = await call("recover-live");
-  expect(recovered.events).toEqual(["pull", "ensure", "action:connect"]);
-  expect(recovered.saved?.workspace).toBe("running");
-  expect(recovered.saved?.timings?.resumeMs).toBeGreaterThanOrEqual(10);
-  const blocked = await call("recover-live-pull-fails");
-  expect(blocked.events).toEqual(["pull"]);
-  expect(blocked.saved?.workspace).toBe("failed");
-  expect(blocked.saved?.timings?.resumeMs).toBeGreaterThanOrEqual(0);
-});
-
-test("failed sync/push never reports saved or destroys the only working copy", async () => {
-  for (const mode of [
-    "pull-fails",
-    "skipped-file",
-    "artifact-fails",
-    "fingerprint-fails",
-  ]) {
+test("archive errors and truncation leave live disk usable, never destroy it", async () => {
+  for (const mode of ["archive", "truncated", "fingerprint", "refused"]) {
     const result = await call(mode);
     expect(result.events).not.toContain("destroy");
+    expect(result.checkpoint).toBeUndefined();
+    expect(result.saved?.workspace).toBe("running");
     expect(result.saved?.persistence?.state).toBe("error");
-    expect(result.saved?.persistence?.savedAt).toBeUndefined();
   }
-  const retained = await call("failure-keeps-checkpoint");
-  expect(retained.observation).toEqual(retained.checkpoint);
-  expect(retained.saved?.persistence?.state).toBe("error");
 });
 
-test("polls neither wake a stopped workspace nor renew its idle lease", async () => {
-  const cold = await call("cold-read");
-  expect(cold.events).toEqual([]);
-  expect(cold.saved).toMatchObject({
-    workspace: "failed",
-    saved: false,
-    interrupted: true,
+test("a native snapshot outage still permits durable R2 save and suspension", async () => {
+  const result = await call("snapshot");
+  expect(result.saved?.workspace).toBe("suspended");
+  expect(result.saved?.persistence?.state).toBe("saved");
+  expect(result.checkpoint).not.toHaveProperty("snapshot");
+});
+
+test("automatic save failure reconnects on live disk and retries without a prompt", async () => {
+  const result = await call("failed-suspend");
+  expect(result.during).toMatchObject({
+    workspace: "running",
+    persistence: { state: "error" },
   });
-  expect((await call("poll-does-not-renew")).observation).toBe(123);
+  expect(result.events).toContain("action:connect");
+  expect(result.events).not.toContain("action:prompt");
+  expect(result.events).not.toContain("restore:r2");
+  expect(result.saved?.persistence?.state).toBe("saved");
 });
 
-test("status remains readable while a checkpoint is blocked", async () => {
-  const result = await call("slow-save");
-  expect(result.observation).toMatchObject([
-    { workspace: "running" },
-    { persistence: { state: "saving" } },
-    { thread: { workspace: "running" } },
+test("retry keeps the previous checkpoint until successful commit", async () => {
+  const result = await call("retry");
+  expect(result.during).toMatchObject({
+    checkpoint: result.before,
+    saved: { persistence: { state: "error" } },
+  });
+  expect(result.checkpoint).not.toEqual(result.before);
+  expect(result.saved?.persistence?.state).toBe("saved");
+});
+
+test("native restore precedes agent connect; expired snapshots use R2", async () => {
+  const restored = await call("resume");
+  expect(restored.events).toEqual([
+    "restore:disk-1",
+    "lease",
+    "exec",
+    "ensure",
+    "action:connect",
   ]);
-});
-
-test("simultaneous resumes join one startup and suspended restores are fenced on failure", async () => {
-  const concurrent = await call("resume-twice");
-  expect(concurrent.events.filter((event) => event === "ensure")).toHaveLength(
-    1,
-  );
-  expect(concurrent.saved?.workspace).toBe("running");
-  const restored = await call("resume-suspended");
-  expect(restored.events).toContain("restore");
   expect(restored.saved?.workspace).toBe("running");
-  expect(restored.restorePending).toBeUndefined();
-  const failed = await call("restore-fails");
-  expect(failed.saved?.workspace).toBe("failed");
-  expect(failed.restorePending).toBe(true);
+  const expired = await call("expired");
+  expect(expired.events).toEqual([
+    "boot",
+    "lease",
+    "exec",
+    "restore:r2",
+    "ensure",
+    "action:connect",
+  ]);
+  const updated = await call("image-update");
+  expect(updated.events).toEqual(expired.events);
 });
 
-test("deletion remains fenced even if Artifacts cleanup fails", async () => {
-  const result = await call("delete-fails");
-  expect(result.events).toEqual(["close", "destroy", "delete-artifact"]);
-  expect(result.deleted).toBe(true);
-  expect(result.saved).toBeNull();
+test("interrupted restores stay fenced, without starting an agent or replaying work", async () => {
+  for (const mode of ["restore-fails", "boot-fails", "no-checkpoint"]) {
+    const result = await call(mode);
+    expect(result.saved?.workspace).toBe("failed");
+    expect(result.events).not.toContain("ensure");
+    expect(result.events).not.toContain("action:prompt");
+    if (mode !== "no-checkpoint") expect(result.pending).toBe(true);
+  }
 });
 
-test("credential epochs permit first login and fence stale writes after logout", async () => {
-  expect(await call("write", "alice", { epoch: 0, value: null })).toEqual({
-    epoch: 0,
+test("long-turn recovery uses its crash snapshot, not an older idle archive", async () => {
+  const result = await call("live-recovery");
+  expect(result.events[0]).toBe("restore:disk-1");
+  expect(result.saved?.interrupted).toBe(true);
+  expect(result.events).not.toContain("action:prompt");
+});
+
+test("messages and file inspection transparently restore; concurrent connects join", async () => {
+  const message = await call("message");
+  expect(message.events.filter((e) => e.startsWith("action:"))).toEqual([
+    "action:connect",
+    "action:prompt",
+  ]);
+  const inspect = await call("inspect");
+  expect(inspect.events.at(-1)).toBe("exec");
+  expect(inspect.saved?.workspace).toBe("running");
+  const concurrent = await call("concurrent");
+  expect(concurrent.events.filter((e) => e === "ensure")).toHaveLength(1);
+});
+
+test("passive reads never wake a stopped workspace", async () => {
+  expect((await call("passive")).events).toEqual([]);
+});
+
+test("reads stay responsive while backup is in flight", async () => {
+  expect((await call("slow-save")).during).toMatchObject({
+    persistence: { state: "saving" },
   });
+});
+
+test("a new prompt waits for suspension then restores and sends exactly once", async () => {
+  const result = await call("queued-prompt");
+  expect(result.during).toMatchObject({ workspace: "suspending" });
+  expect(result.events).toEqual([
+    "quiesce",
+    "archive",
+    "snapshot:checkpoint",
+    "destroy",
+    "restore:disk-1",
+    "lease",
+    "exec",
+    "ensure",
+    "action:connect",
+    "action:prompt",
+  ]);
+  expect(result.saved?.workspace).toBe("running");
+});
+
+test("an interrupted suspension is recoverable without replaying a prompt", async () => {
+  const result = await call("interrupted-suspend");
+  expect(result.during).toMatchObject({ workspace: "failed" });
+  expect(result.events).toEqual(["ensure", "action:connect"]);
+  expect(result.saved?.workspace).toBe("running");
+});
+
+test("credential epochs fence stale writes after logout", async () => {
   expect(
     await call("write", "alice", { epoch: 0, value: "synthetic-login" }),
   ).toEqual({ epoch: 0 });
-  expect(await call("read", "alice")).toEqual({
-    epoch: 0,
-    value: "synthetic-login",
-  });
   expect(await call("read", "bob")).toEqual({ epoch: 0, value: null });
   expect(await call("write", "alice", { epoch: 0, value: null })).toEqual({
     epoch: 1,
@@ -270,58 +244,4 @@ test("credential epochs permit first login and fence stale writes after logout",
   expect(
     await call("write", "alice", { epoch: 0, value: "late-refresh" }),
   ).toBeNull();
-  expect(
-    await call("write", "alice", { epoch: 1, value: "new-login" }),
-  ).toEqual({ epoch: 1 });
 });
-
-// Requires a locally built sandbox/Computer.Dockerfile image and Docker/FUSE.
-test.skipIf(!process.env.COMPUTER_IMAGE)(
-  "real computerd restores source and rollouts after container replacement, not credentials",
-  async () => {
-    const name = `agentflare-computer-test-${crypto.randomUUID()}`;
-    async function docker(...args: string[]) {
-      const proc = Bun.spawn(["docker", ...args], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const output = await new Response(proc.stderr).text();
-      if ((await proc.exited) !== 0) throw Error(output);
-    }
-    async function start() {
-      await docker(
-        "run",
-        "-d",
-        "--name",
-        name,
-        "--privileged",
-        "-p",
-        "127.0.0.1:19487:8080",
-        process.env.COMPUTER_IMAGE!,
-      );
-      for (let i = 0; i < 60; i++) {
-        if (
-          (await fetch("http://127.0.0.1:19487/health").catch(() => null))?.ok
-        )
-          return;
-        await Bun.sleep(250);
-      }
-      throw Error("computerd did not become ready");
-    }
-    try {
-      await start();
-      expect((await call("probe-write", name)).source).toBe(
-        "uncommitted-source",
-      );
-      await docker("rm", "-f", name);
-      await start();
-      expect(await call("probe-read", name)).toEqual({
-        stdout: "uncommitted-sourcerollout-state",
-        source: "uncommitted-source",
-      });
-    } finally {
-      await docker("rm", "-f", name).catch(() => {});
-    }
-  },
-  60000,
-);

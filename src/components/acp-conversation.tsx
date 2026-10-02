@@ -60,6 +60,7 @@ export function AcpConversation({
   const [now, setNow] = useState(() => Date.now());
   const {
     snapshot,
+    runtime,
     repository,
     draft: prompt,
     attachments,
@@ -130,9 +131,7 @@ export function AcpConversation({
     const text = prompt.trim();
     if (
       (!text && !attachments?.length) ||
-      snapshot?.status !== "ready" ||
-      snapshot.saved ||
-      (snapshot.workspace && snapshot.workspace !== "running") ||
+      !canCompose ||
       actionPending ||
       attachmentReading
     )
@@ -151,7 +150,7 @@ export function AcpConversation({
     }
     if (
       attachments?.some((block) => block.type === "resource") &&
-      !snapshot.promptCapabilities?.embeddedContext
+      !snapshot?.promptCapabilities?.embeddedContext
     ) {
       setSendError(
         "This agent does not support embedded context. Remove context before sending.",
@@ -167,6 +166,8 @@ export function AcpConversation({
   const stopped =
     saved || Boolean(snapshot?.workspace && snapshot.workspace !== "running");
   const idle = snapshot?.status === "ready" && !stopped;
+  const sleeping = runtime?.autoResume && snapshot?.workspace === "suspended";
+  const canCompose = idle || Boolean(sleeping);
 
   const status =
     snapshot?.workspace && snapshot.workspace !== "running"
@@ -485,7 +486,7 @@ export function AcpConversation({
             </div>
           ))}
 
-          {!stopped &&
+          {(!stopped || sleeping) &&
             (snapshot?.error ||
               networkError ||
               snapshot?.status === "disconnected") && (
@@ -508,7 +509,7 @@ export function AcpConversation({
                 </Button>
               </div>
             )}
-          {snapshot?.status === "connecting" && (
+          {snapshot?.status === "connecting" && !runtime?.autoResume && (
             <p role="status" className="text-muted-foreground">
               starting Codex session…
             </p>
@@ -527,7 +528,9 @@ export function AcpConversation({
             role="alert"
             className="mx-auto mb-2 max-w-3xl text-[11px] text-muted-foreground"
           >
-            Save failed. Working files remain here. Retry before suspending.{" "}
+            {runtime?.autoResume
+              ? "Backup delayed. Your workspace is still running; saving retries automatically."
+              : "Save failed. Working files remain here. Retry before suspending."}{" "}
             Last checkpoint: <span title={savedAt}>{checkpointAge}</span>.
             {persistence.failure && persistence.state === "error" && (
               <span className="block break-words select-text">
@@ -537,7 +540,8 @@ export function AcpConversation({
             )}
           </p>
         )}
-        {stopped && (
+        {stopped && !sleeping &&
+          !(runtime?.autoResume && (snapshot?.workspace === "recovering" || snapshot?.workspace === "suspending")) && (
           <div className="mx-auto mb-2 w-full max-w-3xl rounded-md border bg-muted/30 p-3 text-muted-foreground">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p>
@@ -596,7 +600,7 @@ export function AcpConversation({
           key={threadId}
           attachments={attachments ?? []}
           capabilities={snapshot?.promptCapabilities}
-          disabled={!idle || actionPending}
+          disabled={!canCompose || actionPending}
           onChange={(next) => {
             const current = store.get(threadId);
             if (current.attachments !== attachments || current.pending)
@@ -611,9 +615,9 @@ export function AcpConversation({
           <AcpMentionInput
             key={threadId}
             threadId={threadId}
-            disabled={!idle || actionPending || attachmentReading}
+            disabled={!canCompose || actionPending || attachmentReading}
             placeholder={
-              idle
+              canCompose
                 ? "Describe a developer task… @ to reference a file"
                 : stopped
                   ? "Resume workspace to continue"
@@ -628,7 +632,7 @@ export function AcpConversation({
             title="Send message (Ctrl/⌘ + Enter)"
             className="rounded-md"
             disabled={
-              !idle ||
+              !canCompose ||
               actionPending ||
               attachmentReading ||
               (!prompt.trim() && !attachments?.length)

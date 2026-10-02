@@ -289,7 +289,10 @@ export class ThreadStateStore {
             },
           }
         : {}),
-      ...(action.type === "connect" &&
+      ...((action.type === "connect" ||
+        (action.type === "prompt" &&
+          this.get(id).runtime?.autoResume &&
+          previousSnapshot?.workspace === "suspended")) &&
       (previousSnapshot?.saved || previousSnapshot?.workspace)
         ? {
             snapshot: {
@@ -330,7 +333,9 @@ export class ThreadStateStore {
     } catch (error) {
       let recoveredSnapshot = previousSnapshot;
       if (
-        (action.type === "suspend" || action.type === "checkpoint") &&
+        (action.type === "suspend" ||
+          action.type === "checkpoint" ||
+          (action.type === "prompt" && this.get(id).runtime?.autoResume)) &&
         previousSnapshot
       ) {
         // The server may have quiesced Codex before a later save stage failed.
@@ -346,6 +351,7 @@ export class ThreadStateStore {
         this.update(id, {
           error: (error as Error).message,
           ...((action.type === "connect" ||
+            (action.type === "prompt" && this.get(id).runtime?.autoResume) ||
             action.type === "suspend" ||
             action.type === "checkpoint") &&
           previousSnapshot

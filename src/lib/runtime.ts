@@ -10,6 +10,7 @@ export type RuntimeState = {
   started: boolean;
   repository?: string;
   agent?: "codex";
+  autoResume?: boolean;
   workspace?: WorkspaceLifecycle;
 };
 export type RepositoryFile = { path: string; content: string };

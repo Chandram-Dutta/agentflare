@@ -6,60 +6,57 @@ Agentflare owns account access, workspaces, code review, and publishing. Codex
 owns model and tool execution through an Agent Client Protocol (ACP) adapter.
 There is no browser terminal in the current UI.
 
-## Next: per-thread Computer runtime (preview)
+## Next: DO-owned native containers (preview)
 
-The `next` Worker environment adds `@cloudflare/computer` 0.3.2 and Artifacts.
-New threads use their own Computer Durable Object and container, keyed by account
-and thread. Existing `user` runtime records keep their original sandbox and R2
-backups; removing a binding never redirects a saved thread to a different runtime.
-The sections below describe that existing shared runtime unless noted otherwise.
+Each account/thread has one Durable Object and one native Linux filesystem.
+The persisted runtime name and class remain `computer` / `ComputerThread` to
+retain ownership and checkpoint identities, but execution uses `ctx.container`
+directly: no computerd, FUSE, filesystem push/pull, or Artifacts save dependency.
+Existing `user` runtimes remain on the original shared sandbox described below.
 
-Computer syncs `/workspace` into the owning Durable Object's SQLite filesystem
-every 30 seconds. This is an explicit pull, **not synchronous durable writes**:
-an unexpected container loss can lose changes since the last successful pull.
-Status, activity, and conversation reads neither start a container nor renew its
-idle lease. After two minutes without an agent operation or busy turn, the idle
-agent is quiesced and saved before its container is destroyed. A user can also
-choose **Save and suspend**. Busy agents and failed checkpoints prevent intentional
-shutdown. Processes are restarted, not restored from memory.
+The DO serializes mutations and checkpoint commits; transcript reads bypass that
+queue. A 30-second alarm observes agent activity and renews a ten-minute container
+lease, including after a DO restart. Busy agents, approvals, authentication and
+unknown activity never count as idle. Browser polling does not own the lease.
 
-Workspace lifecycle (running, suspending, suspended, recovering, failed) is separate
-from agent activity and save status. While work runs, incremental pulls are recovery
-data, not complete saves. Idle checkpoints upload a workspace archive and matching
-transcript to private R2, then checkpoint code in Artifacts. Only after all succeed
-does the Durable Object publish the new checkpoint pointer. The current and previous
-successful archives are retained. Conversation polling bypasses the save queue;
-mutating requests and file inspection can still wait for an in-progress checkpoint.
+Long turns receive native crash snapshots at most every two minutes. These may
+contain partial writes and are **not** advertised as consistent backups. Between
+turns, the runtime archives `/workspace` and its transcript to private R2, attempts
+a native snapshot, verifies the workspace fingerprint, then atomically advances
+the checkpoint pointer and clears the older crash snapshot. Native snapshot
+failure does not block a successful R2 backup. Current and previous R2 checkpoints
+are retained. GitHub publishing remains a separate explicit action.
 
-Explicit resume from a clean suspension restores the committed archive, including
-Git state and native Codex rollouts. Interrupted runtimes instead attempt recovery
-from the newer incremental filesystem; a partial archive restore is fenced and
-retried before the agent can run. Recovery never resubmits a prompt. Archives are
-filesystem backups, not VM snapshots: background processes are not frozen during
-ordinary idle checkpoints, and files outside `/workspace` are not included.
+After ten minutes without work or an inspection, the agent is quiesced, saved and
+the container stopped. Failed saves retain the live disk, reconnect the stopped
+agent without replaying a prompt, and retry on the alarm. A DO restart during
+suspension is treated as interrupted, never silently as a healthy running agent.
 
-Artifacts is a code checkpoint, not GitHub publishing or a deployed preview.
-Checkpoint commits use a separate Git index and do not change the working branch
-or staging area. GitHub still receives only explicit review/publish actions.
-Ignored files and native Codex rollouts persist in Computer, not the Git artifact.
+A new message or repository inspection restores a sleeping workspace automatically.
+Live disk takes precedence over backups. Lost containers use their newer crash
+snapshot, or the last complete checkpoint. A native checkpoint is used only while
+fresh and on the matching image; R2 restores onto the current image after expiry
+or an image update. Failed/partial restoration stays fenced until recovery succeeds.
+A missing recovery source never creates a fresh checkout over the lost workspace.
 
-Codex runs with an ephemeral `/run/codex` home. Only its canonical `sessions` and
-`archived_sessions` directories link into `/workspace`; `auth.json` never does.
-A separate account-level Durable Object stores encrypted credentials for new
-thread startup. The old shared runtime's credentials are not migrated; the first
-Computer thread needs sign-in. Native SQLite indexes are rebuilt from rollouts.
-Container replacement does not automatically replay interrupted prompts.
+Snapshots save disk, not memory or processes, and Cloudflare expires them after
+30 days without restore. R2 preserves `/workspace`, including ignored files, Git
+state and Codex rollouts, without that expiry. Installed tools elsewhere in the
+root filesystem survive native snapshots but are not in the R2 fallback. An expired
+crash snapshot cannot safely be replaced silently by an older idle backup; recovery
+fails closed. Neither mechanism guarantees zero data loss after an abrupt failure.
 
-Deletion fences the thread first, destroys its container, removes the scoped
-Artifact repository, R2 objects and durable filesystem. A cleanup failure leaves
-the database row available for deletion retry. Other threads and account login
-are retained. Agents can still read credentials made available inside their own
-container; this is not a security boundary between the agent and its login.
+The image mounts `/run` as tmpfs before serving requests and fails startup if the
+mount fails. Codex credentials, capabilities, PIDs, logs and temporary archives
+live there, outside both snapshots and R2. Canonical Codex rollout directories
+link into `/workspace`. Account credentials remain encrypted in a separate DO.
+The archive service is separate from the agent: restoration completes before
+Codex starts. Agents can still read credentials supplied to their own container.
 
-The local integration check uses real computerd/FUSE with Durable Object SQLite
-and replaces the container to verify file/rollout recovery and auth exclusion.
-Cloudflare scheduling, real Artifacts pushes and provider-backed Codex resume
-still require a smoke test on the isolated Next deployment.
+Local checks exercise real DO SQLite/R2 with simulated native APIs and replace
+Docker containers to check filesystem/archive recovery and credential exclusion.
+Docker commit is not a test of Cloudflare's native snapshot service; a live canary
+is required before rollout. See [native runtime cutover](native-runtime-cutover.md).
 
 ## Components
 

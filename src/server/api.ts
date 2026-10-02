@@ -363,7 +363,7 @@ api.post("/projects/:id/threads", async (c) => {
       id: crypto.randomUUID(),
       projectId: owned.id,
       runtime:
-        c.env.Computers && c.env.ComputerAuth && c.env.ARTIFACTS
+        c.env.Computers && c.env.ComputerAuth && c.env.BACKUP_BUCKET
           ? "computer"
           : "user",
       createdAt: Date.now(),

@@ -638,7 +638,7 @@ test("Computer threads keep their runtime identity and isolate account/thread di
     },
   } as unknown as NonNullable<Bindings["Computers"]>;
   env.ComputerAuth = {} as NonNullable<Bindings["ComputerAuth"]>;
-  env.ARTIFACTS = {} as NonNullable<Bindings["ARTIFACTS"]>;
+  env.BACKUP_BUCKET = {} as NonNullable<Bindings["BACKUP_BUCKET"]>;
   env.Sandboxes = {
     idFromName: (name: string) => {
       calls.push(name);
@@ -711,7 +711,7 @@ test("Computer threads keep their runtime identity and isolate account/thread di
   } finally {
     delete env.Computers;
     delete env.ComputerAuth;
-    delete env.ARTIFACTS;
+    delete env.BACKUP_BUCKET;
     delete env.Sandboxes;
   }
 });
@@ -735,7 +735,7 @@ test("checkpoint API validates ownership and Computer runtime before dispatch", 
     }),
   } as unknown as NonNullable<Bindings["Computers"]>;
   env.ComputerAuth = {} as NonNullable<Bindings["ComputerAuth"]>;
-  env.ARTIFACTS = {} as NonNullable<Bindings["ARTIFACTS"]>;
+  env.BACKUP_BUCKET = {} as NonNullable<Bindings["BACKUP_BUCKET"]>;
   try {
     const thread = await createThread(project.id);
     const endpoint = `/threads/${thread.id}/runtime/acp`;
@@ -765,7 +765,7 @@ test("checkpoint API validates ownership and Computer runtime before dispatch", 
   } finally {
     delete env.Computers;
     delete env.ComputerAuth;
-    delete env.ARTIFACTS;
+    delete env.BACKUP_BUCKET;
   }
 });
 
