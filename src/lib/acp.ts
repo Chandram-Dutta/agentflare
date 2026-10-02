@@ -1,4 +1,5 @@
 import type { ContentBlock } from "@agentclientprotocol/sdk";
+import type { WorkspaceLifecycle } from "./runtime";
 
 export type AcpContent = ContentBlock;
 
@@ -12,6 +13,7 @@ export type AcpMessage = {
 
 export type AcpActivity = {
   status: AcpSnapshot["status"];
+  workspace?: WorkspaceLifecycle;
   attention: boolean;
   attentionId?: string;
   turn?: string;
@@ -19,14 +21,16 @@ export type AcpActivity = {
 };
 
 export type AcpSnapshot = {
+  workspace?: WorkspaceLifecycle;
   turnCancelled?: boolean;
   authScope?: "user";
   authPersistence?: "saved" | "pending";
   saved?: boolean;
   interrupted?: boolean;
   persistence?: {
-    state: "saved" | "saving" | "error" | "disabled";
+    state: "saved" | "saving" | "dirty" | "error" | "disabled";
     savedAt?: string;
+    checkpointId?: string;
   };
   status:
     | "disconnected"
@@ -64,6 +68,7 @@ export type AcpSnapshot = {
 
 export type AcpAction =
   | { type: "connect" }
+  | { type: "suspend" }
   | { type: "authenticate" }
   | {
       type: "prompt";

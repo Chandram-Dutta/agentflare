@@ -1,7 +1,16 @@
+export type WorkspaceLifecycle =
+  | "starting"
+  | "running"
+  | "suspending"
+  | "suspended"
+  | "recovering"
+  | "failed";
+
 export type RuntimeState = {
   started: boolean;
   repository?: string;
   agent?: "codex";
+  workspace?: WorkspaceLifecycle;
 };
 export type RepositoryFile = { path: string; content: string };
 export type GitChange = { path: string; index: string; worktree: string };

@@ -208,6 +208,13 @@ Object migration. Keep these isolated from the existing production Worker.
 The image needs kernel FUSE; do not substitute the filesystem shim for persistent
 agent sessions. Existing shared-runtime threads still need their R2 credentials.
 
+Computer also requires a private `BACKUP_BUCKET` binding for conversation data and
+versioned workspace archives under `computer/`. Uploads use the Worker binding,
+not S3 credentials inside the container. Do not apply lifecycle expiry to that
+prefix. Current and previous successful checkpoints are retained; thread deletion
+removes its objects. Allow space for ignored dependencies and Git/session data,
+not just tracked source. Recovery does not restore running processes.
+
 Run the container-replacement check on a Docker host with FUSE support:
 
 ```sh

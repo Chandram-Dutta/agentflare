@@ -103,6 +103,53 @@ test("saved history is shown without connecting or polling until resume", async 
   ]);
 });
 
+test("stopped Computers stay asleep until explicit resume, and observe another client's resume", async () => {
+  const calls: string[] = [];
+  const suspended: AcpSnapshot = {
+    ...ready,
+    saved: true,
+    workspace: "suspended",
+  };
+  const store = storeWith(async (path, method) => {
+    calls.push(`${method}:${path}`);
+    if (path.endsWith("/status")) return { ...runtime, workspace: "suspended" };
+    if (path.endsWith("/saved")) return suspended;
+    return { ...ready, workspace: "running" };
+  });
+  await store.ensure("a");
+  await store.pollConversation("a");
+  expect(calls).toHaveLength(2);
+  expect(activityLabel(store.get("a"))).toBe("suspended");
+  store.update("a", {
+    activity: { status: "ready", attention: false, workspace: "running" },
+  });
+  await store.pollConversation("a");
+  expect(calls.at(-1)).toBe("GET:/threads/a/runtime/acp");
+  expect(store.get("a").snapshot?.workspace).toBe("running");
+  expect(calls.some((call) => call.startsWith("POST:"))).toBe(false);
+});
+
+test("failed suspend restores the current view, exposes the error, and keeps the draft", async () => {
+  const response = deferred<AcpSnapshot>();
+  const store = storeWith(async () => {
+    await response.promise;
+    throw Error("Workspace archive failed.");
+  });
+  const snapshot: AcpSnapshot = { ...ready, workspace: "running" };
+  store.update("a", { runtime, snapshot, draft: "keep this" });
+  const saving = store.action("a", { type: "suspend" });
+  expect(activityLabel(store.get("a"))).toBe("suspending");
+  expect(store.get("a").snapshot?.persistence?.state).toBe("saving");
+  response.resolve(ready);
+  await saving;
+  expect(store.get("a")).toMatchObject({
+    snapshot,
+    draft: "keep this",
+    pending: false,
+    error: "Workspace archive failed.",
+  });
+});
+
 test("switching while saved-history requests overlap keeps responses isolated", async () => {
   const savedA = deferred<AcpSnapshot | null>();
   const savedB = deferred<AcpSnapshot | null>();

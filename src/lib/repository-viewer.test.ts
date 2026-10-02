@@ -3,6 +3,7 @@ import {
   CONTEXT_LIMIT,
   fileContext,
   RepositoryViewer,
+  textContext,
 } from "./repository-viewer";
 
 function deferred<T>() {
@@ -163,4 +164,84 @@ test("context limit is inclusive; large files still support bounded selections a
   expect(fileContext(file, { start: 2, end: 2 })?.content).toBe("short");
   expect(fileContext({ path: "empty", content: "" })?.content).toBe("");
   expect(fileContext({ path: "loading" })).toBeUndefined();
+});
+
+test("text context preserves partial columns, repeated text, CRLF, tabs and Unicode", () => {
+  const file = {
+    path: "src/example.ts",
+    content: "repeat\r\n\trepeat 🙂  \r\nfinish",
+  };
+  const start = { line: 2, column: 3 };
+  const end = { line: 3, column: 3 };
+  const expected = {
+    kind: "selection" as const,
+    path: file.path,
+    content: "peat 🙂  \r\nfin",
+    startLine: 2,
+    endLine: 3,
+  };
+  expect(textContext(file, { start, end })).toEqual(expected);
+  expect(textContext(file, { start: end, end: start })).toEqual(expected);
+  expect(
+    textContext(file, {
+      start: { line: 2, column: 0 },
+      end: { line: 2, column: 10 },
+    })?.content,
+  ).toBe("\trepeat 🙂");
+});
+
+test("text endpoint at next line start preserves newline without claiming the excluded line", () => {
+  const file = { path: "a.txt", content: "first\nsecond\n" };
+  expect(
+    textContext(file, {
+      start: { line: 1, column: 2 },
+      end: { line: 2, column: 0 },
+    }),
+  ).toEqual({
+    kind: "selection",
+    path: "a.txt",
+    content: "rst\n",
+    startLine: 1,
+    endLine: 1,
+  });
+  expect(
+    textContext(file, {
+      start: { line: 2, column: 6 },
+      end: { line: 3, column: 0 },
+    })?.content,
+  ).toBe("\n");
+});
+
+test("text selections reject collapsed, unavailable and invalid endpoints", () => {
+  const file = { path: "a.txt", content: "abc\nxyz" };
+  const start = { line: 1, column: 0 };
+  for (const end of [
+    start,
+    { line: 0, column: 1 },
+    { line: 3, column: 0 },
+    { line: 2, column: 4 },
+    { line: 1, column: -1 },
+    { line: 1, column: 1.5 },
+    { line: NaN, column: 0 },
+  ]) {
+    expect(textContext(file, { start, end })).toBeUndefined();
+  }
+  const selection = { start, end: { line: 1, column: 2 } };
+  expect(textContext({ path: file.path }, selection)).toBeUndefined();
+  expect(textContext({ ...file, error: "Deleted" }, selection)).toBeUndefined();
+});
+
+test("native text selection accepts exactly 64k from a larger line and never truncates", () => {
+  const file = {
+    path: "large.txt",
+    content: "prefix" + "x".repeat(CONTEXT_LIMIT) + "suffix",
+  };
+  const start = { line: 1, column: 6 };
+  expect(
+    textContext(file, { start, end: { line: 1, column: 6 + CONTEXT_LIMIT } })
+      ?.content,
+  ).toBe("x".repeat(CONTEXT_LIMIT));
+  expect(
+    textContext(file, { start, end: { line: 1, column: 7 + CONTEXT_LIMIT } }),
+  ).toBeUndefined();
 });

@@ -80,6 +80,7 @@ export function AcpConversation({
       (!text && !attachments?.length) ||
       snapshot?.status !== "ready" ||
       snapshot.saved ||
+      (snapshot.workspace && snapshot.workspace !== "running") ||
       actionPending ||
       attachmentReading
     )
@@ -111,13 +112,20 @@ export function AcpConversation({
 
   const loginUrl = snapshot?.login ? safeLoginUrl(snapshot.login.url) : null;
   const saved = Boolean(snapshot?.saved);
-  const idle = snapshot?.status === "ready" && !saved;
+  const stopped =
+    saved || Boolean(snapshot?.workspace && snapshot.workspace !== "running");
+  const idle = snapshot?.status === "ready" && !stopped;
 
-  const status = saved
-    ? "saved"
-    : networkError
-      ? "disconnected"
-      : (snapshot?.status ?? "loading");
+  const status =
+    snapshot?.workspace && snapshot.workspace !== "running"
+      ? snapshot.workspace === "failed"
+        ? "interrupted"
+        : snapshot.workspace
+      : saved
+        ? "saved"
+        : networkError
+          ? "disconnected"
+          : (snapshot?.status ?? "loading");
   const persistence = snapshot?.persistence;
   const savedAt = persistence?.savedAt
     ? new Date(persistence.savedAt).toLocaleString()
@@ -129,7 +137,9 @@ export function AcpConversation({
         ? "save pending"
         : persistence.state === "error"
           ? "workspace save failed"
-          : "workspace saving disabled"
+          : persistence.state === "dirty"
+            ? "unsaved changes"
+            : "workspace saving disabled"
     : undefined;
   const controls = (
     <div className="flex items-center gap-1 text-muted-foreground">
@@ -150,13 +160,13 @@ export function AcpConversation({
         {persistenceLabel && (
           <span
             className="hidden items-center gap-1 text-[10px] text-muted-foreground sm:flex"
-            title={`Workspace checkpoint: ${persistenceLabel}. ${savedAt ? `Last safe save: ${savedAt}. ` : ""}Chat saves while you work. Full workspace backups wait until all turns are idle and no browser has accessed the runtime for 30 seconds. File changes remain pending while you work.`}
+            title={`Workspace checkpoint: ${persistenceLabel}. ${savedAt ? `Last complete save: ${savedAt}. ` : ""}${persistence?.checkpointId ? `Checkpoint ${persistence.checkpointId}. ` : ""}Active work syncs incrementally. Complete workspace checkpoints are made while the agent is idle; save and suspend stops the agent only after it is idle.`}
           >
             <Save className="size-3" aria-hidden="true" />
             {persistenceLabel}
           </span>
         )}
-        {snapshot?.status === "running" && (
+        {!stopped && snapshot?.status === "running" && (
           <Button
             variant="ghost"
             size="icon-xs"
@@ -187,6 +197,19 @@ export function AcpConversation({
             <LogOut className="size-3" aria-hidden="true" />
           </Button>
         )}
+        {snapshot?.workspace === "running" &&
+          (idle || snapshot.status === "auth-required") && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Save and suspend workspace"
+              title="Save and suspend workspace"
+              disabled={actionPending}
+              onClick={() => void action({ type: "suspend" })}
+            >
+              <Save className="size-3" aria-hidden="true" />
+            </Button>
+          )}
       </div>
     </div>
   );
@@ -229,7 +252,7 @@ export function AcpConversation({
             />
           )}
 
-          {snapshot?.status === "auth-required" && (
+          {!stopped && snapshot?.status === "auth-required" && (
             <div className="border p-3">
               <p className="mb-3 text-muted-foreground">
                 Sign in once to use Codex across your shared threads.
@@ -326,7 +349,7 @@ export function AcpConversation({
             </div>
           ))}
 
-          {!saved &&
+          {!stopped &&
             (snapshot?.error ||
               networkError ||
               snapshot?.status === "disconnected") && (
@@ -363,10 +386,18 @@ export function AcpConversation({
       </div>
 
       <form onSubmit={send} className="border-t px-3 py-2">
-        {saved && (
+        {stopped && (
           <div className="mx-auto mb-2 w-full max-w-3xl rounded-md border bg-muted/30 p-3 text-muted-foreground">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <p>Saved history. Resume the workspace to continue.</p>
+              <p>
+                {snapshot?.workspace === "failed"
+                  ? "Workspace interrupted. Recover to continue; the last operation will not be rerun."
+                  : snapshot?.workspace === "suspending"
+                    ? "Saving workspace before suspension…"
+                    : snapshot?.workspace === "recovering"
+                      ? "Restoring workspace…"
+                      : "Workspace suspended. Resume to continue."}
+              </p>
               <Button
                 type="button"
                 variant="outline"
@@ -375,7 +406,9 @@ export function AcpConversation({
                 onClick={() => void action({ type: "connect" })}
               >
                 <RotateCcw className="mr-1 size-3" aria-hidden="true" />
-                Resume workspace
+                {snapshot?.workspace === "failed"
+                  ? "Recover workspace"
+                  : "Resume workspace"}
               </Button>
             </div>
             {snapshot?.interrupted && (
@@ -426,7 +459,7 @@ export function AcpConversation({
             placeholder={
               idle
                 ? "Describe a developer task… @ to reference a file"
-                : saved
+                : stopped
                   ? "Resume workspace to continue"
                   : "Codex is not ready"
             }

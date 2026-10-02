@@ -119,6 +119,7 @@ export class ThreadStateStore {
       id,
       {
         status: snapshot.status,
+        workspace: snapshot.workspace,
         attention: snapshot.permissions.length > 0 || Boolean(snapshot.login),
         attentionId: snapshot.permissions[0]?.id ?? snapshot.login?.id,
         turnCancelled: snapshot.turnCancelled,
@@ -126,7 +127,7 @@ export class ThreadStateStore {
           snapshot.messages.findLast((m) => m.role === "user")?.id ??
           this.get(id).activity?.turn,
       },
-      !snapshot.saved,
+      snapshot.workspace !== undefined || !snapshot.saved,
     );
     const previous = this.get(id).snapshot;
     if (
@@ -147,6 +148,10 @@ export class ThreadStateStore {
     // Historical transcripts are not observations of the running agent.
     if (!live) return;
     this.activityVersions.set(id, (this.activityVersions.get(id) ?? 0) + 1);
+    if (activity.workspace && activity.workspace !== "running") {
+      this.update(id, { activity });
+      return;
+    }
     const previous = this.get(id);
     let kind = notificationKind(previous.activity, activity);
     if (kind === "finished" && this.finishedTurns.get(id) === activity.turn)
@@ -202,7 +207,12 @@ export class ThreadStateStore {
           ...(runtime.started && saved ? { snapshot: saved } : {}),
         });
         if (runtime.started && saved) this.accept(id, saved);
-        if (runtime.started && runtime.agent === "codex" && !saved?.saved)
+        if (
+          runtime.started &&
+          runtime.agent === "codex" &&
+          !saved?.saved &&
+          (!runtime.workspace || runtime.workspace === "running")
+        )
           await this.action(id, { type: "connect" });
       } catch (error) {
         if ((this.versions.get(id) ?? 0) === version)
@@ -245,12 +255,28 @@ export class ThreadStateStore {
     this.update(id, {
       pending: true,
       error: "",
-      ...(action.type === "connect" && previousSnapshot?.saved
+      ...(action.type === "suspend" && previousSnapshot
+        ? {
+            snapshot: {
+              ...previousSnapshot,
+              workspace: "suspending" as const,
+              persistence: {
+                ...previousSnapshot.persistence,
+                state: "saving" as const,
+              },
+            },
+          }
+        : {}),
+      ...(action.type === "connect" &&
+      (previousSnapshot?.saved || previousSnapshot?.workspace)
         ? {
             snapshot: {
               ...previousSnapshot,
               saved: false,
               status: "connecting",
+              ...(previousSnapshot.workspace
+                ? { workspace: "recovering" as const }
+                : {}),
             },
           }
         : {}),
@@ -283,7 +309,8 @@ export class ThreadStateStore {
       if (this.versions.get(id) === version)
         this.update(id, {
           error: (error as Error).message,
-          ...(action.type === "connect" && previousSnapshot?.saved
+          ...((action.type === "connect" || action.type === "suspend") &&
+          (previousSnapshot?.saved || previousSnapshot?.workspace)
             ? { snapshot: previousSnapshot }
             : {}),
         });
@@ -299,7 +326,7 @@ export class ThreadStateStore {
     if (
       !state.runtime?.started ||
       state.runtime.agent !== "codex" ||
-      state.snapshot?.saved ||
+      (state.snapshot?.saved && state.activity?.workspace !== "running") ||
       state.pending
     )
       return;
@@ -353,8 +380,14 @@ export class ThreadStateStore {
 }
 
 export function activityLabel(state: ThreadState, stale = false) {
-  if (state.pending) return "connecting";
+  if (state.pending)
+    return state.snapshot?.workspace === "suspending"
+      ? "suspending"
+      : "connecting";
   if (stale || state.error) return "unknown";
+  const workspace = state.activity?.workspace ?? state.snapshot?.workspace;
+  if (workspace && workspace !== "running")
+    return workspace === "failed" ? "interrupted" : workspace;
   const activity = state.activity;
   if (!activity) return "not connected";
   if (

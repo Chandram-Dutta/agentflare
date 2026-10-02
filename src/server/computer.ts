@@ -15,6 +15,7 @@ import {
   type RuntimeState,
   type PublishInput,
   type BranchReview,
+  type WorkspaceLifecycle,
 } from "@/lib/runtime";
 import type { UserStart } from "./user-runtime";
 import { publishSnapshot, type PublishState } from "./publish";
@@ -73,6 +74,25 @@ type State = RuntimeState & {
   baseBranch: string;
 };
 
+type Checkpoint = {
+  id: string;
+  savedAt: string;
+  revision: number;
+  prefix: string;
+  artifact?: string;
+};
+const emptyConversation: AcpSnapshot = {
+  status: "disconnected",
+  messages: [],
+  permissions: [],
+};
+const busy = (s: AcpSnapshot) =>
+  ["running", "connecting", "configuring", "authenticating"].includes(
+    s.status,
+  ) ||
+  s.permissions.length > 0 ||
+  Boolean(s.login);
+
 export class ComputerThread extends withWorkspaceContainer(
   class extends DurableObject<Bindings> {},
 ) {
@@ -90,6 +110,8 @@ export class ComputerThread extends withWorkspaceContainer(
     artifacts: this.env.ARTIFACTS ? { binding: this.env.ARTIFACTS } : undefined,
   });
   private operations: Promise<unknown> = Promise.resolve();
+  private saving = false;
+  private resuming?: Promise<AcpSnapshot>;
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.operations.then(work, work);
     this.operations = result.catch(() => {});
@@ -125,19 +147,65 @@ export class ComputerThread extends withWorkspaceContainer(
           "Computer filesystem sync is incomplete. Retry before closing the thread.",
         );
     }
-    await this.ctx.storage.put("saved-at", new Date().toISOString());
-    await this.ctx.storage.delete("checkpoint-error");
+  }
+  private prefix() {
+    return `computer/${this.ctx.id}/`;
+  }
+  private async conversation(): Promise<AcpSnapshot> {
+    const object = await this.env.BACKUP_BUCKET?.get(
+      `${this.prefix()}conversation.json`,
+    );
+    return object
+      ? object.json<AcpSnapshot>()
+      : ((await this.ctx.storage.get<AcpSnapshot>("conversation")) ??
+          emptyConversation);
   }
   private async remember(snapshot: AcpSnapshot) {
+    await this.ctx.storage.put("agent-activity", {
+      status: snapshot.status,
+      attention: snapshot.permissions.length > 0 || Boolean(snapshot.login),
+      turn: snapshot.messages.findLast((m) => m.role === "user")?.id,
+      turnCancelled: snapshot.turnCancelled,
+    } satisfies AcpActivity);
     const saved = { ...snapshot, permissions: [] };
     delete saved.login;
-    const previous = await this.ctx.storage.get<AcpSnapshot>("conversation");
-    if (JSON.stringify(previous) !== JSON.stringify(saved)) {
-      await this.ctx.storage.put({
-        conversation: saved,
-        "changed-at": Date.now(),
-      });
+    const json = JSON.stringify(saved);
+    const digest = Array.from(
+      new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json)),
+      ),
+      (b) => b.toString(16).padStart(2, "0"),
+    ).join("");
+    if ((await this.ctx.storage.get("conversation-digest")) !== digest) {
+      if (!this.env.BACKUP_BUCKET)
+        throw Error("Computer backups are not configured.");
+      await this.env.BACKUP_BUCKET.put(
+        `${this.prefix()}conversation.json`,
+        json,
+      );
+      await this.ctx.storage.put("conversation-digest", digest);
+      await this.dirty();
     }
+  }
+  private async dirty() {
+    await this.ctx.storage.put(
+      "revision",
+      ((await this.ctx.storage.get<number>("revision")) ?? 0) + 1,
+    );
+  }
+  private async lifecycle(): Promise<WorkspaceLifecycle> {
+    const phase = await this.ctx.storage.get<WorkspaceLifecycle>("lifecycle");
+    if (this.resuming && phase === "recovering") return "recovering";
+    if (!this.ctx.container?.running)
+      return phase === "suspended" ? "suspended" : "failed";
+    if (phase === "suspending" && this.saving) return phase;
+    return phase === "failed" || phase === "recovering" || phase === "starting"
+      ? "failed"
+      : "running";
+  }
+  private async requireRunning() {
+    if ((await this.lifecycle()) !== "running")
+      throw Error("Workspace is stopped. Resume it before continuing.");
   }
   private async state(id: string) {
     if (await this.ctx.storage.get("deleted")) throw Error("Thread deleted.");
@@ -148,7 +216,7 @@ export class ComputerThread extends withWorkspaceContainer(
   async userStatus(id: string): Promise<RuntimeState> {
     const state = await this.ctx.storage.get<State>("state");
     return state?.id === id && !(await this.ctx.storage.get("deleted"))
-      ? state
+      ? { ...state, workspace: await this.lifecycle() }
       : { started: false };
   }
   userStart(id: string, input: UserStart & { owner: string }) {
@@ -161,6 +229,7 @@ export class ComputerThread extends withWorkspaceContainer(
           throw Error("Thread ownership mismatch.");
         return previous;
       }
+      await this.ctx.storage.put("lifecycle", "starting");
       const root = `/workspace/threads/${id}`;
       // A failed clone is disposable until the durable state record is committed.
       await this.exec(
@@ -191,6 +260,8 @@ export class ComputerThread extends withWorkspaceContainer(
         baseSha: refs[1],
       };
       await this.ctx.storage.put("state", state);
+      await this.ctx.storage.put("lifecycle", "running");
+      await this.dirty();
       await this.ctx.storage.put("last-active", Date.now());
       await this.ctx.storage.setAlarm(Date.now() + 30_000);
       return state;
@@ -203,6 +274,7 @@ export class ComputerThread extends withWorkspaceContainer(
     staged = false,
   ) {
     const state = await this.state(id);
+    await this.requireRunning();
     const encoded = Buffer.from(
       JSON.stringify({ operation, path, staged, base: state.baseSha }),
     ).toString("base64");
@@ -296,6 +368,7 @@ export class ComputerThread extends withWorkspaceContainer(
       "nohup bun /opt/agentflare/acp/bridge.mjs </dev/null >/run/agentflare-bridge.log 2>&1 & echo $! >/run/agentflare-bridge.pid",
       {
         CODEX_HOME: "/run/codex",
+        AGENTFLARE_COMPUTER: "1",
         AGENTFLARE_AUTH_CALLBACK: `${this.env.BETTER_AUTH_URL}/api/computer-auth/${this.ctx.id}`,
         AGENTFLARE_AUTH_CAPABILITY: token,
       },
@@ -323,60 +396,159 @@ export class ComputerThread extends withWorkspaceContainer(
     return true;
   }
   userAcp(id: string, action?: AcpAction): Promise<AcpSnapshot> {
+    // Reads bypass the mutation/checkpoint queue and never start a container.
+    if (!action) return this.readSnapshot(id);
+    if (action.type === "connect") {
+      if (this.resuming) return this.resuming;
+      this.resuming = this.serial(async () => {
+        const state = await this.state(id);
+        const previous =
+          await this.ctx.storage.get<WorkspaceLifecycle>("lifecycle");
+        const restore =
+          (await this.ctx.storage.get<boolean>("restore-pending")) ||
+          previous === "suspended";
+        await this.ctx.storage.put("lifecycle", "recovering");
+        try {
+          await this.ensureBridge(state);
+          if (restore) {
+            const checkpoint =
+              await this.ctx.storage.get<Checkpoint>("checkpoint");
+            if (!checkpoint) throw Error("Saved workspace restoration failed.");
+            await this.ctx.storage.put("restore-pending", true);
+            const archive = await this.env.BACKUP_BUCKET!.get(
+              `${checkpoint.prefix}/workspace.tar.gz`,
+            );
+            if (!archive) throw Error("Saved workspace restoration failed.");
+            const response = await this.getWorkspaceContainer().fetchPort(
+              8766,
+              "http://container/workspace-archive",
+              { method: "POST", body: archive.body as unknown as BodyInit },
+            );
+            if (!response.ok)
+              throw Error("Saved workspace restoration failed.");
+            await this.pull();
+            await this.ctx.storage.delete("restore-pending");
+          }
+          const snapshot = await this.fetchSnapshot(id, action);
+          await this.remember(snapshot);
+          await this.ctx.storage.put({
+            lifecycle: "running",
+            connected: true,
+            "last-active": Date.now(),
+          });
+          await this.ctx.storage.setAlarm(Date.now() + 30_000);
+          return {
+            ...snapshot,
+            workspace: "running" as const,
+            persistence: await this.persistence(),
+          };
+        } catch (error) {
+          await this.ctx.storage.put("lifecycle", "failed");
+          throw error;
+        }
+      }).finally(() => {
+        this.resuming = undefined;
+      });
+      return this.resuming;
+    }
     return this.serial(async () => {
-      const state = await this.state(id);
-      await this.ensureBridge(state);
+      await this.state(id);
+      if (action.type === "suspend") {
+        if ((await this.lifecycle()) !== "suspended")
+          await this.checkpoint(id, true);
+        return this.readSnapshot(id);
+      }
+      await this.requireRunning();
+      // Persist the dirty marker before allowing the agent to change anything.
+      await this.dirty();
       await this.ctx.storage.put("last-active", Date.now());
-      if ((await this.ctx.storage.getAlarm()) === null)
-        await this.ctx.storage.setAlarm(Date.now() + 30_000);
-      const response = await this.bridge(
-        `/acp/${id}`,
-        action ? "POST" : "GET",
-        action,
-      );
-      if (!response.ok) throw Error("Codex bridge request failed.");
-      const snapshot = (await response.json()) as AcpSnapshot;
+      await this.ctx.storage.setAlarm(Date.now() + 1000);
+      const snapshot = await this.fetchSnapshot(id, action);
       await this.remember(snapshot);
-      return { ...snapshot, persistence: await this.persistence() };
+      return {
+        ...snapshot,
+        workspace: await this.lifecycle(),
+        persistence: await this.persistence(),
+      };
     });
+  }
+  private async fetchSnapshot(id: string, action?: AcpAction) {
+    const response = await this.bridge(
+      `/acp/${id}`,
+      action ? "POST" : "GET",
+      action,
+    );
+    if (!response.ok) throw Error("Codex bridge request failed.");
+    return (await response.json()) as AcpSnapshot;
+  }
+  private async readSnapshot(id: string): Promise<AcpSnapshot> {
+    await this.state(id);
+    const workspace = await this.lifecycle();
+    const snapshot =
+      workspace === "running" &&
+      !this.saving &&
+      (await this.ctx.storage.get("connected"))
+        ? await this.fetchSnapshot(id)
+        : await this.conversation();
+    const persistence = await this.persistence();
+    return {
+      ...snapshot,
+      workspace,
+      saved: workspace === "suspended" && persistence.state === "saved",
+      interrupted: workspace === "failed",
+      persistence,
+    };
   }
   async userSaved(id: string): Promise<AcpSnapshot | null> {
     if (!(await this.userStatus(id)).started) return null;
-    const snapshot = await this.ctx.storage.get<AcpSnapshot>("conversation");
-    return snapshot
-      ? {
-          ...snapshot,
-          saved: !this.ctx.container?.running,
-          interrupted:
-            !this.ctx.container?.running &&
-            ["running", "configuring", "connecting"].includes(snapshot.status),
-          persistence: await this.persistence(),
-        }
-      : null;
+    return this.readSnapshot(id);
   }
   private async persistence(): Promise<
     NonNullable<AcpSnapshot["persistence"]>
   > {
-    const savedAt = await this.ctx.storage.get<string>("saved-at");
-    const changedAt = (await this.ctx.storage.get<number>("changed-at")) ?? 0;
-    const snapshot = await this.ctx.storage.get<AcpSnapshot>("conversation");
+    const checkpoint = await this.ctx.storage.get<Checkpoint>("checkpoint");
+    const revision = (await this.ctx.storage.get<number>("revision")) ?? 0;
     return {
-      state: (await this.ctx.storage.get("checkpoint-error"))
-        ? "error"
-        : savedAt &&
-            Date.parse(savedAt) >= changedAt &&
-            (!this.ctx.container?.running ||
-              snapshot?.status === "ready" ||
-              snapshot?.status === "auth-required")
-          ? "saved"
-          : "saving",
-      savedAt,
+      state: !this.env.BACKUP_BUCKET
+        ? "disabled"
+        : this.saving
+          ? "saving"
+          : (await this.ctx.storage.get("checkpoint-error"))
+            ? "error"
+            : checkpoint &&
+                checkpoint.revision === revision &&
+                (await this.lifecycle()) !== "failed"
+              ? "saved"
+              : "dirty",
+      savedAt: checkpoint?.savedAt,
+      checkpointId: checkpoint?.id,
     };
   }
   async userActivity(): Promise<Record<string, AcpActivity>> {
-    if (!this.ctx.container?.running) return {};
-    const response = await this.bridge("/activity");
-    return response.ok ? response.json() : {};
+    const state = await this.ctx.storage.get<State>("state");
+    if (!state || (await this.ctx.storage.get("deleted"))) return {};
+    const workspace = await this.lifecycle();
+    let activity = (await this.ctx.storage.get<AcpActivity>(
+      "agent-activity",
+    )) ?? { status: "disconnected", attention: false };
+    if (
+      workspace === "running" &&
+      !this.saving &&
+      (await this.ctx.storage.get("connected"))
+    ) {
+      const response = await this.bridge("/activity");
+      if (response.ok)
+        activity =
+          ((await response.json()) as Record<string, AcpActivity>)[state.id] ??
+          activity;
+    }
+    return {
+      [state.id]: {
+        ...activity,
+        workspace,
+        attention: workspace === "failed" || activity.attention,
+      },
+    };
   }
   async alarm() {
     await this.serial(async () => {
@@ -387,26 +559,20 @@ export class ComputerThread extends withWorkspaceContainer(
         return;
       try {
         const state = await this.ctx.storage.get<State>("state");
-        if (state && (await this.bridge("/health").catch(() => null))?.ok) {
-          const response = await this.bridge(`/acp/${state.id}`);
-          if (response.ok) {
-            await this.remember((await response.json()) as AcpSnapshot);
-          }
+        if (!state || (await this.lifecycle()) !== "running") return;
+        const snapshot = await this.fetchSnapshot(state.id);
+        await this.remember(snapshot);
+        if (busy(snapshot)) {
+          // Incremental recovery only; do not advertise a consistent save while writers run.
+          await this.ctx.storage.put("last-work", Date.now());
+          await this.pull();
+          return;
         }
-        await this.pull();
-        const lastActive =
-          (await this.ctx.storage.get<number>("last-active")) ?? 0;
-        if (Date.now() - lastActive < 120_000) return;
-        if (await this.ctx.storage.get("capability")) {
-          const stopped = await this.bridge("/quiesce", "POST");
-          if (stopped.status !== 204) return; // Busy agent: never interrupt it for a checkpoint.
-        }
-        await this.pull();
-        await this.checkpointArtifact();
-        await this.ctx.storage.put("saved-at", new Date().toISOString());
-        await this.ctx.storage.delete("checkpoint-error");
-        await this.computer.close();
-        await this.ctx.container!.destroy();
+        const lastActive = Math.max(
+          (await this.ctx.storage.get<number>("last-active")) ?? 0,
+          (await this.ctx.storage.get<number>("last-work")) ?? 0,
+        );
+        await this.checkpoint(state.id, Date.now() - lastActive >= 120_000);
       } catch {
         await this.ctx.storage.put("checkpoint-error", true);
       } finally {
@@ -414,6 +580,84 @@ export class ComputerThread extends withWorkspaceContainer(
           await this.ctx.storage.setAlarm(Date.now() + 30_000);
       }
     });
+  }
+  private async checkpoint(id: string, suspend: boolean) {
+    await this.requireRunning();
+    if (!this.env.BACKUP_BUCKET)
+      throw Error("Computer backups are not configured.");
+    if (await this.ctx.storage.get("restore-pending"))
+      throw Error("Saved workspace restoration failed.");
+    const snapshot = await this.fetchSnapshot(id);
+    if (busy(snapshot))
+      throw Error(
+        "Agent is busy. Wait for the current operation before suspending.",
+      );
+    this.saving = true;
+    const prefix = `${this.prefix()}checkpoints/${crypto.randomUUID()}`;
+    let committed = false;
+    try {
+      if (suspend) {
+        await this.ctx.storage.put("lifecycle", "suspending");
+        if ((await this.bridge("/quiesce", "POST")).status !== 204)
+          throw Error(
+            "Agent is busy. Wait for the current operation before suspending.",
+          );
+      }
+      await this.remember(snapshot);
+      await this.pull();
+      const response = await this.bridge("/workspace-archive");
+      if (!response.ok || !response.body)
+        throw Error("Workspace archive failed.");
+      await this.env.BACKUP_BUCKET.put(
+        `${prefix}/workspace.tar.gz`,
+        response.body as never,
+      );
+      await this.env.BACKUP_BUCKET.put(
+        `${prefix}/conversation.json`,
+        JSON.stringify({ ...snapshot, permissions: [], login: undefined }),
+      );
+      const artifact = await this.checkpointArtifact();
+      const checkpoint: Checkpoint = {
+        id: prefix.split("/").at(-1)!,
+        prefix,
+        savedAt: new Date().toISOString(),
+        revision: (await this.ctx.storage.get<number>("revision")) ?? 0,
+        artifact,
+      };
+      const previous = await this.ctx.storage.get<Checkpoint>("checkpoint");
+      const obsolete = await this.ctx.storage.get<Checkpoint>(
+        "previous-checkpoint",
+      );
+      await this.ctx.storage.put({
+        checkpoint,
+        ...(previous ? { "previous-checkpoint": previous } : {}),
+      });
+      committed = true;
+      await this.ctx.storage.delete("checkpoint-error");
+      if (obsolete)
+        await this.env.BACKUP_BUCKET.delete([
+          `${obsolete.prefix}/workspace.tar.gz`,
+          `${obsolete.prefix}/conversation.json`,
+        ]).catch(() => {});
+      if (suspend) {
+        await this.computer.close();
+        await this.ctx.container!.destroy();
+        await this.ctx.storage.put("lifecycle", "suspended");
+        await this.ctx.storage.deleteAlarm();
+      }
+    } catch (error) {
+      await this.ctx.storage.put("checkpoint-error", true);
+      // A failed final save may have stopped Codex. Keep the disk, require explicit recovery.
+      if (suspend) await this.ctx.storage.put("lifecycle", "failed");
+      throw error;
+    } finally {
+      this.saving = false;
+      if (!committed)
+        await this.env.BACKUP_BUCKET.delete([
+          `${prefix}/workspace.tar.gz`,
+          `${prefix}/conversation.json`,
+        ]).catch(() => {});
+    }
   }
   private async checkpointArtifact() {
     if (!this.env.ARTIFACTS) return;
@@ -437,7 +681,7 @@ export class ComputerThread extends withWorkspaceContainer(
       `cd ${q(root)} && GIT_INDEX_FILE=/tmp/checkpoint-index git read-tree HEAD && GIT_INDEX_FILE=/tmp/checkpoint-index git add -A && tree=$(GIT_INDEX_FILE=/tmp/checkpoint-index git write-tree) && commit=$(printf 'Agentflare checkpoint\\n' | git commit-tree "$tree" -p HEAD) && git -c credential.helper= -c http.extraHeader="Authorization: Bearer $ARTIFACT_TOKEN" push ${q(repo.remote)} "$commit:refs/heads/checkpoint-${Date.now()}" && printf %s "$commit"`,
       { ARTIFACT_TOKEN: token, GIT_TERMINAL_PROMPT: "0" },
     );
-    await this.ctx.storage.put("artifact-checkpoint", sha.trim());
+    return sha.trim();
   }
   userDelete(id: string) {
     return this.serial(async () => {
@@ -448,6 +692,19 @@ export class ComputerThread extends withWorkspaceContainer(
       await this.computer.close();
       if (this.ctx.container?.running) await this.ctx.container.destroy();
       if (this.env.ARTIFACTS) await this.computer.artifacts.delete("code");
+      if (this.env.BACKUP_BUCKET) {
+        let objects;
+        do {
+          objects = await this.env.BACKUP_BUCKET.list({
+            prefix: this.prefix(),
+            limit: 500,
+          });
+          if (objects.objects.length)
+            await this.env.BACKUP_BUCKET.delete(
+              objects.objects.map((object) => object.key),
+            );
+        } while (objects.truncated);
+      }
       await this.ctx.storage.deleteAll();
       await this.ctx.storage.put("deleted", true);
     });

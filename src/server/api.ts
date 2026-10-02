@@ -479,6 +479,7 @@ api.get("/activity", async (c) => {
 
 const acpAction = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("connect") }),
+  z.strictObject({ type: z.literal("suspend") }),
   z.strictObject({ type: z.literal("authenticate") }),
   z.strictObject({
     type: z.literal("set-config"),
@@ -542,6 +543,11 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
     if (!parsed.success) return c.json({ error: "Invalid ACP action." }, 400);
     action = parsed.data;
   }
+  if (action?.type === "suspend" && owned.runtime !== "computer")
+    return c.json(
+      { error: "Explicit suspension is available for Computer threads." },
+      409,
+    );
   const sandbox = await runtime(c.env, c.get("user").id, owned, true);
   try {
     return c.json(await sandbox.userAcp(owned.id, action));

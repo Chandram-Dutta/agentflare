@@ -45,6 +45,7 @@ export class ComputerProbe extends DurableObject {
 export class TestComputer extends ComputerThread {
   private events: string[] = [];
   private mode = "";
+  private releaseArchive?: () => void;
   constructor(ctx: DurableObjectState, env: Bindings) {
     super(ctx, env);
     const events = this.events;
@@ -57,6 +58,19 @@ export class TestComputer extends ComputerThread {
     };
     Object.assign(this, {
       ctx: { storage: ctx.storage, id: ctx.id, container },
+      ensureBridge: async () => {
+        events.push("ensure");
+        await new Promise((r) => setTimeout(r, 10));
+        container.running = true;
+      },
+      getWorkspaceContainer: () => ({
+        fetchPort: async () => {
+          events.push("restore");
+          return new Response(null, {
+            status: this.mode === "restore-fails" ? 500 : 204,
+          });
+        },
+      }),
       computer: {
         pull: async function* () {
           events.push("pull");
@@ -92,6 +106,14 @@ export class TestComputer extends ComputerThread {
         },
       },
       bridge: async (path: string) => {
+        if (path === "/workspace-archive") {
+          events.push("archive");
+          if (this.mode === "slow-save")
+            await new Promise<void>((resolve) => {
+              this.releaseArchive = resolve;
+            });
+          return new Response("archive-bytes");
+        }
         if (path === "/health") return new Response(null, { status: 204 });
         if (path === "/quiesce") {
           events.push("quiesce");
@@ -102,8 +124,7 @@ export class TestComputer extends ComputerThread {
         return Response.json({
           status: this.mode === "busy" ? "running" : "ready",
           messages: [{ id: "answer", role: "assistant", text: "done" }],
-          permissions: [{ id: "secret" }],
-          login: { url: "must-not-persist" },
+          permissions: [],
         });
       },
     });
@@ -116,18 +137,81 @@ export class TestComputer extends ComputerThread {
       started: true,
     });
     await this.ctx.storage.put("capability", "test-bridge");
+    await this.ctx.storage.put("lifecycle", "running");
+    await this.ctx.storage.put("connected", true);
+    let observation;
+    if (["active", "slow-save", "failure-keeps-checkpoint"].includes(mode))
+      await this.ctx.storage.put("last-active", Date.now());
     if (mode.startsWith("delete")) {
       try {
         await this.userDelete("thread");
       } catch {
         /* inspect the failed cleanup */
       }
+    } else if (mode === "cold-read") {
+      await this.ctx.container!.destroy();
+      this.events.length = 0;
+      observation = {
+        snapshot: await this.userAcp("thread"),
+        activity: await this.userActivity(),
+        lastActive: await this.ctx.storage.get("last-active"),
+      };
+      try {
+        await this.userInspect("thread", "files");
+      } catch {
+        /* stopped inspections must not boot */
+      }
+    } else if (mode === "slow-save") {
+      const saving = this.alarm();
+      while (!this.releaseArchive) await new Promise((r) => setTimeout(r, 1));
+      try {
+        observation = await Promise.race([
+          Promise.all([
+            this.userStatus("thread"),
+            this.userSaved("thread"),
+            this.userActivity(),
+          ]),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(Error("Reads blocked behind save")), 500),
+          ),
+        ]);
+      } finally {
+        this.releaseArchive();
+        await saving;
+      }
+    } else if (mode === "resume-twice") {
+      await this.ctx.container!.destroy();
+      this.events.length = 0;
+      observation = await Promise.all([
+        this.userAcp("thread", { type: "connect" }),
+        this.userAcp("thread", { type: "connect" }),
+      ]);
+    } else if (mode === "failure-keeps-checkpoint") {
+      await this.alarm();
+      observation = await this.ctx.storage.get("checkpoint");
+      this.mode = "artifact-fails";
+      await this.alarm();
+    } else if (mode === "resume-suspended" || mode === "restore-fails") {
+      await this.alarm();
+      try {
+        await this.userAcp("thread", { type: "connect" });
+      } catch {
+        /* inspect failed restore */
+      }
+    } else if (mode === "poll-does-not-renew") {
+      await this.ctx.storage.put("last-active", 123);
+      await this.userAcp("thread");
+      await this.userActivity();
+      observation = await this.ctx.storage.get("last-active");
     } else await this.alarm();
     await this.ctx.storage.deleteAlarm();
     return {
       events: this.events,
       deleted: await this.ctx.storage.get("deleted"),
       saved: await this.userSaved("thread"),
+      checkpoint: await this.ctx.storage.get("checkpoint"),
+      observation,
+      restorePending: await this.ctx.storage.get("restore-pending"),
     };
   }
 }

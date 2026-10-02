@@ -10,5 +10,6 @@
 !sandbox/acp/content.mjs
 !sandbox/acp/auth-checkpoint.mjs
 !sandbox/acp/checkpoint-loop.mjs
+!sandbox/acp/workspace-archive.mjs
 !sandbox/Computer.Dockerfile
 sandbox/acp/node_modules/

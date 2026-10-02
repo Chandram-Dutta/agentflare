@@ -21,6 +21,49 @@ export type ViewerState = {
 
 export const CONTEXT_LIMIT = REPOSITORY_CONTEXT_LIMIT;
 
+export type SourcePosition = { line: number; column: number };
+export type TextSelection = { start: SourcePosition; end: SourcePosition };
+
+/** DOM columns are UTF-16 offsets; slice the source, not rendered/normalized text. */
+export function textContext(
+  file: ViewerFile,
+  selection: TextSelection,
+): RepositoryContext | undefined {
+  if (file.content === undefined || file.error) return;
+  const lines = file.content.split("\n");
+  function offset(position: SourcePosition) {
+    const { line, column } = position;
+    if (
+      !Number.isSafeInteger(line) ||
+      !Number.isSafeInteger(column) ||
+      line < 1 ||
+      line > lines.length ||
+      column < 0 ||
+      column > lines[line - 1].replace(/\r$/, "").length
+    )
+      return;
+    return (
+      lines
+        .slice(0, line - 1)
+        .reduce((sum, value) => sum + value.length + 1, 0) + column
+    );
+  }
+  const a = offset(selection.start);
+  const b = offset(selection.end);
+  if (a === undefined || b === undefined || a === b) return;
+  const start = Math.min(a, b);
+  const end = Math.max(a, b);
+  if (end - start > CONTEXT_LIMIT) return;
+  return {
+    kind: "selection",
+    path: file.path,
+    content: file.content.slice(start, end),
+    startLine: file.content.slice(0, start).split("\n").length,
+    // An endpoint at column zero excludes that line.
+    endLine: file.content.slice(0, end - 1).split("\n").length,
+  };
+}
+
 /** Only complete, explicitly selected lines are sent; never silently truncate a range. */
 export function fileContext(
   file: ViewerFile,

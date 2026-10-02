@@ -21,6 +21,7 @@ beforeAll(async () => {
       script: await build.outputs[0].text(),
       compatibilityDate: "2026-09-29",
       compatibilityFlags: ["nodejs_compat"],
+      r2Buckets: { BACKUP_BUCKET: "test-backups" },
       durableObjects: {
         Test: { className: "TestComputer", useSQLite: true },
         Vault: { className: "ComputerCredentials", useSQLite: true },
@@ -68,9 +69,9 @@ async function call(
 test("Computer only destroys an idle runtime after pull and Artifacts succeed", async () => {
   const result = await call("idle");
   expect(result.events).toEqual([
-    "pull",
     "quiesce",
     "pull",
+    "archive",
     "artifact",
     "close",
     "destroy",
@@ -79,8 +80,11 @@ test("Computer only destroys an idle runtime after pull and Artifacts succeed", 
   expect(result.saved?.permissions).toEqual([]);
   expect(result.saved?.login).toBeUndefined();
   const busy = await call("busy");
-  expect(busy.events).toEqual(["pull", "quiesce"]);
-  expect(busy.saved?.persistence?.state).toBe("saving");
+  expect(busy.events).toEqual(["pull"]);
+  expect(busy.saved?.persistence?.state).toBe("dirty");
+  const active = await call("active");
+  expect(active.events).toEqual(["pull", "archive", "artifact"]);
+  expect(active.saved?.workspace).toBe("running");
 });
 
 test("failed sync/push never reports saved or destroys the only working copy", async () => {
@@ -88,10 +92,46 @@ test("failed sync/push never reports saved or destroys the only working copy", a
     const result = await call(mode);
     expect(result.events).not.toContain("destroy");
     expect(result.saved?.persistence?.state).toBe("error");
-    if (mode === "artifact-fails")
-      expect(result.saved?.persistence?.savedAt).toBeDefined();
-    else expect(result.saved?.persistence?.savedAt).toBeUndefined();
+    expect(result.saved?.persistence?.savedAt).toBeUndefined();
   }
+  const retained = await call("failure-keeps-checkpoint");
+  expect(retained.checkpoint).toEqual(retained.observation);
+  expect(retained.saved?.persistence?.state).toBe("error");
+});
+
+test("polls neither wake a stopped workspace nor renew its idle lease", async () => {
+  const cold = await call("cold-read");
+  expect(cold.events).toEqual([]);
+  expect(cold.saved).toMatchObject({
+    workspace: "failed",
+    saved: false,
+    interrupted: true,
+  });
+  expect((await call("poll-does-not-renew")).observation).toBe(123);
+});
+
+test("status remains readable while a checkpoint is blocked", async () => {
+  const result = await call("slow-save");
+  expect(result.observation).toMatchObject([
+    { workspace: "running" },
+    { persistence: { state: "saving" } },
+    { thread: { workspace: "running" } },
+  ]);
+});
+
+test("simultaneous resumes join one startup and suspended restores are fenced on failure", async () => {
+  const concurrent = await call("resume-twice");
+  expect(concurrent.events.filter((event) => event === "ensure")).toHaveLength(
+    1,
+  );
+  expect(concurrent.saved?.workspace).toBe("running");
+  const restored = await call("resume-suspended");
+  expect(restored.events).toContain("restore");
+  expect(restored.saved?.workspace).toBe("running");
+  expect(restored.restorePending).toBeUndefined();
+  const failed = await call("restore-fails");
+  expect(failed.saved?.workspace).toBe("failed");
+  expect(failed.restorePending).toBe(true);
 });
 
 test("deletion remains fenced even if Artifacts cleanup fails", async () => {

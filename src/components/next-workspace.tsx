@@ -515,6 +515,8 @@ function WorkspaceShell({
                         if (
                           current.pending ||
                           current.snapshot?.saved ||
+                          (current.snapshot?.workspace &&
+                            current.snapshot.workspace !== "running") ||
                           current.snapshot?.status !== "ready"
                         ) {
                           throw new Error(
@@ -730,6 +732,8 @@ function ChangeReview({
                 state.hydrated &&
                   state.runtime?.started &&
                   !state.snapshot?.saved &&
+                  (!state.snapshot?.workspace ||
+                    state.snapshot.workspace === "running") &&
                   state.snapshot?.status !== "connecting",
               )}
             />
@@ -751,13 +755,17 @@ function ChangeReview({
             <div className="border-b pb-3">
               <dt className="text-muted-foreground">Workspace</dt>
               <dd className="mt-1">
-                {state.snapshot?.saved
-                  ? "Saved conversation · resume to inspect files"
-                  : state.runtime?.started
-                    ? "Running"
-                    : state.pending
-                      ? "Starting…"
-                      : "Not running"}
+                {state.snapshot?.workspace
+                  ? state.snapshot.workspace === "failed"
+                    ? "Interrupted · recover from the conversation"
+                    : state.snapshot.workspace
+                  : state.snapshot?.saved
+                    ? "Saved conversation · resume to inspect files"
+                    : state.runtime?.started
+                      ? "Running"
+                      : state.pending
+                        ? "Starting…"
+                        : "Not running"}
               </dd>
             </div>
             <div className="border-b pb-3">

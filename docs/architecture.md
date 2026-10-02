@@ -17,10 +17,26 @@ The sections below describe that existing shared runtime unless noted otherwise.
 Computer syncs `/workspace` into the owning Durable Object's SQLite filesystem
 every 30 seconds. This is an explicit pull, **not synchronous durable writes**:
 an unexpected container loss can lose changes since the last successful pull.
-After two minutes without conversation access, an idle agent is quiesced, synced,
-and its repository checkpoint is pushed to a private, thread-scoped Artifacts
-repository before the container is destroyed. Busy agents and failed checkpoints
-prevent intentional shutdown. Processes are restarted, not restored from memory.
+Status, activity, and conversation reads neither start a container nor renew its
+idle lease. After two minutes without an agent operation or busy turn, the idle
+agent is quiesced and saved before its container is destroyed. A user can also
+choose **Save and suspend**. Busy agents and failed checkpoints prevent intentional
+shutdown. Processes are restarted, not restored from memory.
+
+Workspace lifecycle (running, suspending, suspended, recovering, failed) is separate
+from agent activity and save status. While work runs, incremental pulls are recovery
+data, not complete saves. Idle checkpoints upload a workspace archive and matching
+transcript to private R2, then checkpoint code in Artifacts. Only after all succeed
+does the Durable Object publish the new checkpoint pointer. The current and previous
+successful archives are retained. Conversation polling bypasses the save queue;
+mutating requests and file inspection can still wait for an in-progress checkpoint.
+
+Explicit resume from a clean suspension restores the committed archive, including
+Git state and native Codex rollouts. Interrupted runtimes instead attempt recovery
+from the newer incremental filesystem; a partial archive restore is fenced and
+retried before the agent can run. Recovery never resubmits a prompt. Archives are
+filesystem backups, not VM snapshots: background processes are not frozen during
+ordinary idle checkpoints, and files outside `/workspace` are not included.
 
 Artifacts is a code checkpoint, not GitHub publishing or a deployed preview.
 Checkpoint commits use a separate Git index and do not change the working branch
@@ -35,7 +51,7 @@ Computer thread needs sign-in. Native SQLite indexes are rebuilt from rollouts.
 Container replacement does not automatically replay interrupted prompts.
 
 Deletion fences the thread first, destroys its container, removes the scoped
-Artifact repository and clears its durable filesystem. A cleanup failure leaves
+Artifact repository, R2 objects and durable filesystem. A cleanup failure leaves
 the database row available for deletion retry. Other threads and account login
 are retained. Agents can still read credentials made available inside their own
 container; this is not a security boundary between the agent and its login.

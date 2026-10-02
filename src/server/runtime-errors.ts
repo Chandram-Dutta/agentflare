@@ -10,6 +10,34 @@ type Operation =
 // prompts, shell commands, and repository contents; never return or log them.
 const known = new Map<string, [string, string]>([
   [
+    "Workspace is stopped. Resume it before continuing.",
+    [
+      "workspace_stopped",
+      "This workspace is not running. Resume or recover it from the conversation before opening files or sending a message.",
+    ],
+  ],
+  [
+    "Agent is busy. Wait for the current operation before suspending.",
+    [
+      "workspace_busy",
+      "The agent is still working or waiting for approval. Finish or stop that operation before saving and suspending.",
+    ],
+  ],
+  [
+    "Computer backups are not configured.",
+    [
+      "workspace_backups_missing",
+      "Workspace checkpoints require the BACKUP_BUCKET binding. Ask the operator to configure backups; do not delete this thread.",
+    ],
+  ],
+  [
+    "Workspace archive failed.",
+    [
+      "workspace_archive_failed",
+      "The workspace could not be archived. The previous checkpoint is retained. Retry after checking free disk space and background processes modifying files.",
+    ],
+  ],
+  [
     "This thread's sandbox has been deleted.",
     [
       "thread_cleanup_pending",

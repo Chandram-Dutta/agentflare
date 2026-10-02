@@ -6,6 +6,7 @@ import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { retainContent, appendContent, boundContent, promptContent } from "./content.mjs";
 import { createAuthCheckpoint } from "./auth-checkpoint.mjs";
 import { createCheckpointLoop } from "./checkpoint-loop.mjs";
+import { createWorkspaceArchive } from "./workspace-archive.mjs";
 
 function childExit(child) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -56,7 +57,7 @@ export function createUserBridge({
   let quiescing = false;
   let quiesced = false;
   const child = spawn(command[0], command.slice(1), {
-    cwd: root,
+    cwd: process.env.AGENTFLARE_COMPUTER === "1" ? "/workspace" : root,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
     env: {
@@ -399,12 +400,14 @@ if (import.meta.main) {
     shouldContinue: () => bridge.isAlive() && Object.values(bridge.activity()).some(
       (s) => ["running", "configuring", "connecting", "authenticating"].includes(s.status)),
   });
+  const archive = process.env.AGENTFLARE_COMPUTER === "1" ? createWorkspaceArchive() : null;
   const server = Bun.serve({
     hostname: "0.0.0.0", // Reachable only through the authenticated Worker/DO.
     port: 8766,
-    maxRequestBodySize: 2_100_000,
+    maxRequestBodySize: archive ? 2 * 1024 ** 3 : 2_100_000,
     async fetch(request) {
       const path = new URL(request.url).pathname;
+      if (path === "/workspace-archive" && archive) return archive(request);
       if (path === "/health") return new Response(null, { status: bridge.isAlive() ? 204 : 503 });
       if (path === "/activity" && request.method === "GET")
         return Response.json(bridge.activity(), { headers: { "Cache-Control": "no-store" } });
