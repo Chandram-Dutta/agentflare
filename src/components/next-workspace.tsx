@@ -26,6 +26,7 @@ import {
   Plus,
   Sun,
   Trash2,
+  Info,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { toast } from "./ui/toast";
@@ -622,11 +623,6 @@ function WorkspaceShell({
                           </Button>
                         </div>
                       ))}
-                    {project && !changes.length && (
-                      <p className="px-3 py-4 text-xs text-muted-foreground">
-                        No threads yet.
-                      </p>
-                    )}
                   </nav>
                   {project && (
                     <div className="flex items-center gap-2 border-t px-3 py-2">
@@ -716,17 +712,13 @@ function WorkspaceShell({
                           : "Agentflare Next / development preview"}
                       </p>
                       <h1 className="mt-4 text-2xl">
-                        {project
-                          ? project.name
-                          : "A place to build and review."}
+                        {project ? project.name : "Projects"}
                       </h1>
-                      <p className="mt-4 text-sm leading-6 text-muted-foreground">
-                        {route?.changeId || (route?.projectId && !project)
-                          ? "This destination is not available. Choose a project or thread from the sidebar."
-                          : project
-                            ? "Start a thread and work back and forth with the agent. Return to the conversation anytime, and review code changes before publishing."
-                            : "Connect a repository, start a thread with the agent, and review code changes before publishing to GitHub."}
-                      </p>
+                      {(route?.changeId || (route?.projectId && !project)) && (
+                        <p className="mt-4 text-sm text-muted-foreground">
+                          This destination is not available.
+                        </p>
+                      )}
                       <div className="mt-6">
                         {project ? (
                           <Button
@@ -742,12 +734,6 @@ function WorkspaceShell({
                           </div>
                         )}
                       </div>
-                      <p className="mt-10 border-t pt-4 text-xs leading-5 text-muted-foreground">
-                        This is the first review-workspace milestone. Cloudflare
-                        account connection, independent review runs, and
-                        infrastructure releases are not enabled yet. No
-                        production deployment access is granted to the agent.
-                      </p>
                     </section>
                   )
                 }
@@ -785,14 +771,14 @@ function WorkspaceShell({
       )}
       <footer className="flex h-7 shrink-0 items-center gap-3 border-t px-3 text-[10px] text-muted-foreground">
         <GitBranch className="size-3" />
-        <span className="truncate">
-          {change ? `agentflare/${change.id}` : "No thread selected"}
-        </span>
+        <span className="truncate">{change ? change.name : project?.name}</span>
         <button
           className="ml-auto shrink-0 underline-offset-2 hover:underline"
+          aria-label="Browser recovery details"
+          title="Browser recovery details"
           onClick={() => setRecoveryInfo(true)}
         >
-          Recovery info
+          <Info className="size-3.5" aria-hidden="true" />
         </button>
       </footer>
       <Dialog open={recoveryInfo} onOpenChange={setRecoveryInfo}>
@@ -1011,14 +997,14 @@ function ChangeReview({
                         : "Not running"}
               </dd>
             </div>
-            <div className="border-b pb-3">
-              <dt className="text-muted-foreground">Review evidence</dt>
-              <dd className="mt-1">
-                {review
-                  ? `${review.changes.length} changed paths · against ${review.baseBranch}`
-                  : "Open Code to inspect the current workspace. No verified review result yet."}
-              </dd>
-            </div>
+            {review && (
+              <div className="border-b pb-3">
+                <dt className="text-muted-foreground">Review evidence</dt>
+                <dd className="mt-1">
+                  {`${review.changes.length} changed paths · against ${review.baseBranch}`}
+                </dd>
+              </div>
+            )}
           </dl>
           <Link
             href={workspaceHref(project.id, change.id, "code")}
@@ -1037,11 +1023,6 @@ function ChangeReview({
               <ArrowUpRight className="size-3" />
             </a>
           )}
-          <p className="mt-10 text-xs leading-5 text-muted-foreground">
-            Agent output is not independent verification. Review the diff and
-            test results before publishing. Cloudflare releases are not enabled
-            in this milestone.
-          </p>
         </section>
       )}
     </div>
@@ -1079,15 +1060,6 @@ function DeveloperPane({
         />
       ) : (
         <div className="p-5 text-xs leading-5">
-          <p>
-            {state.pending
-              ? "Starting workspace…"
-              : "Start the workspace when you’re ready to build."}
-          </p>
-          <p className="mt-3 text-muted-foreground">
-            Codex works on this thread’s checkout. GitHub publishing remains a
-            separate review action.
-          </p>
           {state.error && (
             <p role="alert" className="mt-3 text-destructive">
               {state.error}

@@ -15,8 +15,10 @@ import {
   RotateCcw,
   Save,
   Pause,
+  GitCompareArrows,
 } from "lucide-react";
 import { createPortal } from "react-dom";
+import { Popover } from "@base-ui/react/popover";
 import { Button } from "./ui/button";
 import { AcpMessages } from "./acp-messages";
 import { AcpComposerControls } from "./acp-composer-controls";
@@ -58,6 +60,7 @@ export function AcpConversation({
   const [now, setNow] = useState(() => Date.now());
   const {
     snapshot,
+    repository,
     draft: prompt,
     attachments,
     error: networkError,
@@ -212,21 +215,69 @@ export function AcpConversation({
     : undefined;
   const controls = (
     <div className="flex flex-wrap items-center justify-end gap-1 text-muted-foreground">
-      <span
-        role="status"
-        aria-label={`Codex: ${status}`}
-        title={`Codex: ${status}`}
-        className="flex items-center gap-1.5 px-1 text-[10px]"
-      >
-        <Bot className="size-3.5" aria-hidden="true" />
-        <span
-          className={`size-1.5 rounded-full ${idle && !networkError ? "bg-emerald-500" : "bg-primary"}`}
-          aria-hidden="true"
-        />
-        <span>{status}</span>
-      </span>
+      <Popover.Root>
+        <Popover.Trigger
+          aria-label={`Workspace details: ${status}`}
+          title="Workspace details"
+          className="flex h-6 items-center gap-1.5 rounded px-1 text-[10px] hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+        >
+          <Bot className="size-3.5" aria-hidden="true" />
+          <span
+            className={`size-1.5 rounded-full ${idle && !networkError ? "bg-emerald-500" : "bg-primary"}`}
+            aria-hidden="true"
+          />
+          {!idle && <span>{status}</span>}
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Positioner
+            side="bottom"
+            align="end"
+            sideOffset={8}
+            className="z-50"
+          >
+            <Popover.Popup className="max-w-[calc(100vw-24px)] rounded-md border bg-background p-3 text-xs shadow-lg">
+              <Popover.Title>Codex · {status}</Popover.Title>
+              <div className="mt-2 space-y-1 text-muted-foreground">
+                {persistenceLabel && (
+                  <p>
+                    {persistenceLabel}
+                    {savedAt ? ` · ${savedAt}` : ""}
+                  </p>
+                )}
+                {snapshot?.timings?.startupMs !== undefined && (
+                  <p>
+                    Startup {(snapshot.timings.startupMs / 1000).toFixed(1)}s
+                  </p>
+                )}
+                {snapshot?.timings?.resumeMs !== undefined && (
+                  <p>Resume {(snapshot.timings.resumeMs / 1000).toFixed(1)}s</p>
+                )}
+                {persistence?.durationMs !== undefined && (
+                  <p>
+                    Save {(persistence.durationMs / 1000).toFixed(1)}s
+                    {persistence.unchanged ? " · unchanged" : ""}
+                  </p>
+                )}
+              </div>
+            </Popover.Popup>
+          </Popover.Positioner>
+        </Popover.Portal>
+      </Popover.Root>
       <div className="flex flex-wrap items-center justify-end gap-2">
-        {persistenceLabel && (
+        {idle &&
+          Boolean(repository?.review?.changes.length) &&
+          onReviewChanges && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Review changes"
+              title="Review changes"
+              onClick={onReviewChanges}
+            >
+              <GitCompareArrows className="size-3" aria-hidden="true" />
+            </Button>
+          )}
+        {persistenceLabel && persistence?.state === "error" && (
           <span
             className="hidden items-center gap-1 text-[10px] text-muted-foreground sm:flex"
             role="status"
@@ -272,7 +323,12 @@ export function AcpConversation({
             <>
               <Button
                 variant="ghost"
-                size="xs"
+                size="icon-xs"
+                aria-label={
+                  persistence?.state === "error"
+                    ? "Retry save"
+                    : "Save checkpoint"
+                }
                 title={
                   canSave
                     ? "Save files without stopping the workspace"
@@ -282,20 +338,16 @@ export function AcpConversation({
                 onClick={() => void saveWorkspace("checkpoint")}
               >
                 <Save className="size-3" aria-hidden="true" />
-                {persistence?.state === "error"
-                  ? "Retry save"
-                  : "Save checkpoint"}
               </Button>
               <Button
                 variant="ghost"
-                size="xs"
+                size="icon-xs"
                 aria-label="Suspend workspace"
                 title="Save a checkpoint, then stop the workspace"
                 disabled={actionPending || savePending || !canSave}
                 onClick={() => void saveWorkspace("suspend")}
               >
                 <Pause className="size-3" aria-hidden="true" />
-                Suspend
               </Button>
             </>
           )}
@@ -328,11 +380,6 @@ export function AcpConversation({
               connecting to Codex…
             </p>
           )}
-          {snapshot?.messages.length === 0 && idle && (
-            <p className="text-muted-foreground">
-              Codex is ready. Send a developer task below.
-            </p>
-          )}
           {snapshot && (
             <AcpMessages
               messages={snapshot.messages}
@@ -340,22 +387,6 @@ export function AcpConversation({
               onOpenFile={onOpenFile}
             />
           )}
-          {idle &&
-            !snapshot?.turnCancelled &&
-            snapshot?.messages.some(
-              (message) => message.role === "assistant",
-            ) &&
-            onReviewChanges && (
-              <div className="mt-4 rounded border p-3 text-xs">
-                <p className="mb-2 text-muted-foreground">
-                  Agent is ready. Review the branch-wide diff and test evidence
-                  before publishing.
-                </p>
-                <Button variant="outline" onClick={onReviewChanges}>
-                  Review changes
-                </Button>
-              </div>
-            )}
 
           {!stopped && snapshot?.status === "auth-required" && (
             <div className="border p-3">
@@ -491,62 +522,21 @@ export function AcpConversation({
       </div>
 
       <form onSubmit={send} className="border-t px-3 py-2">
-        {(snapshot?.timings?.startupMs !== undefined ||
-          snapshot?.timings?.resumeMs !== undefined ||
-          persistence?.durationMs !== undefined) && (
+        {!stopped && persistence && persistence.state === "error" && (
           <p
-            className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-x-3 text-[10px] text-muted-foreground"
-            aria-label="Measured workspace durations"
+            role="alert"
+            className="mx-auto mb-2 max-w-3xl text-[11px] text-muted-foreground"
           >
-            {snapshot?.timings?.startupMs !== undefined && (
-              <span>
-                Startup {(snapshot.timings.startupMs / 1000).toFixed(1)}s
-              </span>
-            )}
-            {snapshot?.timings?.resumeMs !== undefined && (
-              <span>
-                Last connect/resume{" "}
-                {(snapshot.timings.resumeMs / 1000).toFixed(1)}s
-              </span>
-            )}
-            {persistence?.durationMs !== undefined && (
-              <span
-                title={
-                  persistence.checkedAt
-                    ? new Date(persistence.checkedAt).toLocaleString()
-                    : undefined
-                }
-              >
-                Last save attempt {(persistence.durationMs / 1000).toFixed(1)}s
-                {persistence.unchanged && persistence.state === "saved"
-                  ? " · unchanged, checkpoint reused"
-                  : ""}
+            Save failed. Working files remain here. Retry before suspending.{" "}
+            Last checkpoint: <span title={savedAt}>{checkpointAge}</span>.
+            {persistence.failure && persistence.state === "error" && (
+              <span className="block break-words select-text">
+                Failed at {persistence.failure.stage}. Reference:{" "}
+                {persistence.failure.reference}
               </span>
             )}
           </p>
         )}
-        {!stopped &&
-          persistence &&
-          persistence.state !== "saved" &&
-          persistence.state !== "disabled" && (
-            <p
-              role={persistence.state === "error" ? "alert" : "status"}
-              className="mx-auto mb-2 max-w-3xl text-[11px] text-muted-foreground"
-            >
-              {persistence.state === "error"
-                ? "Save failed. Working files remain in this workspace. Retry save before suspending."
-                : savePending
-                  ? "Saving files; the workspace will stay running."
-                  : "Changes are awaiting an idle checkpoint."}{" "}
-              Last checkpoint: <span title={savedAt}>{checkpointAge}</span>.
-              {persistence.failure && persistence.state === "error" && (
-                <span className="block break-words select-text">
-                  Failed at {persistence.failure.stage}. Reference:{" "}
-                  {persistence.failure.reference}
-                </span>
-              )}
-            </p>
-          )}
         {stopped && (
           <div className="mx-auto mb-2 w-full max-w-3xl rounded-md border bg-muted/30 p-3 text-muted-foreground">
             <div className="flex flex-wrap items-center justify-between gap-2">

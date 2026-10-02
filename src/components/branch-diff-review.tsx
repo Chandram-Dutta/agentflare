@@ -25,6 +25,8 @@ import {
   List,
   MessageSquarePlus,
   RefreshCw,
+  ChevronsUpDown,
+  ChevronsDownUp,
 } from "lucide-react";
 import type { BranchReview } from "../lib/runtime";
 import {
@@ -100,19 +102,21 @@ export function BranchDiffReview(props: BranchDiffReviewProps) {
             type="button"
             className={`${control} ${style === "unified" ? "bg-muted" : ""}`}
             aria-pressed={style === "unified"}
+            aria-label="Unified diff"
+            title="Unified diff"
             onClick={() => setStyle("unified")}
           >
             <List className="size-3.5" aria-hidden="true" />
-            Unified
           </button>
           <button
             type="button"
             className={`${control} ${style === "split" ? "bg-muted" : ""}`}
             aria-pressed={style === "split"}
+            aria-label="Split diff"
+            title="Split diff"
             onClick={() => setStyle("split")}
           >
             <Columns2 className="size-3.5" aria-hidden="true" />
-            Split
           </button>
         </div>
         <button
@@ -124,8 +128,8 @@ export function BranchDiffReview(props: BranchDiffReviewProps) {
         >
           <RefreshCw className="size-3.5" aria-hidden="true" />
         </button>
+        <ReviewTests base={props.base} review={props.review} />
       </div>
-      <ReviewTests base={props.base} review={props.review} />
       <ReviewFiles
         key={`${identity}:${refresh}`}
         {...props}
@@ -198,6 +202,13 @@ function ReviewFiles({
   const failures = Object.values(results).filter(
     (result) => result.state === "error",
   ).length;
+  const reviewedCount = review.changes.filter((file) => {
+    const result = results[file.path];
+    return (
+      result?.state === "ready" &&
+      isReviewed(state, file.path, result.fingerprint)
+    );
+  }).length;
   useEffect(() => {
     if (restoredScroll.current || finished + failures !== review.changes.length)
       return;
@@ -217,21 +228,18 @@ function ReviewFiles({
   return (
     <>
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2">
-        <span role="status" className="text-muted-foreground">
-          {finished}/{review.changes.length} loaded
-          {failures ? ` · ${failures} failed` : ""}
-          {" · "}
-          {
-            review.changes.filter((file) => {
-              const result = results[file.path];
-              return (
-                result?.state === "ready" &&
-                isReviewed(state, file.path, result.fingerprint)
-              );
-            }).length
-          }
-          /{review.changes.length} reviewed
-        </span>
+        {finished < review.changes.length && (
+          <span role="status" className="text-muted-foreground">
+            {failures
+              ? `${failures} failed`
+              : `${finished}/${review.changes.length} loaded`}
+          </span>
+        )}
+        {reviewedCount > 0 && (
+          <span className="text-muted-foreground">
+            {reviewedCount}/{review.changes.length} reviewed
+          </span>
+        )}
         {review.changes.length > 0 && (
           <>
             <select
@@ -261,18 +269,22 @@ function ReviewFiles({
             <button
               type="button"
               className={control}
+              aria-label="Expand all diffs"
+              title="Expand all diffs"
               onClick={() => setCollapsed(new Set())}
             >
-              Expand all
+              <ChevronsUpDown className="size-3.5" aria-hidden="true" />
             </button>
             <button
               type="button"
               className={control}
+              aria-label="Collapse all diffs"
+              title="Collapse all diffs"
               onClick={() =>
                 setCollapsed(new Set(review.changes.map((file) => file.path)))
               }
             >
-              Collapse all
+              <ChevronsDownUp className="size-3.5" aria-hidden="true" />
             </button>
           </>
         )}
@@ -482,12 +494,6 @@ function DiffBody({
     );
   return (
     <DiffFallback key={patch} patch={patch}>
-      {onAddContext && (
-        <p className="px-3 py-2 text-muted-foreground">
-          Select line numbers to request changes. Comments are attached to the
-          agent composer for you to send.
-        </p>
-      )}
       <PatchDiff
         patch={patch}
         options={{

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { GitPullRequest, Upload } from "lucide-react";
 import { Button } from "./ui/button";
 import { toast } from "./ui/toast";
 import { Input } from "./ui/input";
@@ -69,25 +70,26 @@ export function PublishChanges({
           Open PR #{published.number} ↗
         </a>
       )}
-      <p className="text-muted-foreground text-[11px]">
-        {published
-          ? published.revision === review.revision
-            ? "This snapshot was published. CI status has not been fetched."
-            : "Local changes are not verified as published. Review before updating the PR."
-          : "Review changes → request fixes or create a draft PR → inspect CI on GitHub."}
-      </p>
-      <Button
-        variant="outline"
-        className="w-full text-xs"
-        disabled={!review.changes.length && !published}
-        onClick={() => {
-          setTarget(review);
-          setError("");
-          setConfirmed(false);
-        }}
-      >
-        {published ? "Update PR" : "Create draft PR"}
-      </Button>
+      {(review.changes.length > 0 || published) && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={published ? "Update PR" : "Create draft PR"}
+          title={published ? "Update PR" : "Create draft PR"}
+          disabled={!review.changes.length && !published}
+          onClick={() => {
+            setTarget(review);
+            setError("");
+            setConfirmed(false);
+          }}
+        >
+          {published ? (
+            <Upload className="size-4" />
+          ) : (
+            <GitPullRequest className="size-4" />
+          )}
+        </Button>
+      )}
       <Dialog
         open={!!target}
         onOpenChange={(open) => {

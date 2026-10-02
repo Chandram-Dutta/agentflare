@@ -38,6 +38,8 @@ export function AcpComposerControls({
     ? Math.round((contextUsage.used / contextUsage.size) * 100)
     : undefined;
 
+  if (!options.length && !contextUsage) return null;
+
   return (
     <div className="mx-auto mb-2 flex w-full max-w-3xl flex-wrap items-center justify-between gap-x-3 gap-y-1">
       {options.length > 0 && (
@@ -127,45 +129,47 @@ export function AcpComposerControls({
           </Popover.Portal>
         </Popover.Root>
       )}
-      <Popover.Root>
-        <Popover.Trigger
-          className={`${triggerClass} ml-auto shrink-0`}
-          aria-label="Context estimate details"
-        >
-          {contextUsage && (
-            <progress
-              aria-label="Last reported context usage"
-              className="h-1 w-10 accent-primary"
-              max={contextUsage.size}
-              value={Math.min(contextUsage.used, contextUsage.size)}
-            />
-          )}
-          <span>context {percent === undefined ? "—" : `${percent}%`}</span>
-        </Popover.Trigger>
-        <Popover.Portal>
-          <Popover.Positioner
-            side="top"
-            align="end"
-            sideOffset={8}
-            className="z-50"
+      {contextUsage && (
+        <Popover.Root>
+          <Popover.Trigger
+            className={`${triggerClass} ml-auto shrink-0`}
+            aria-label="Context estimate details"
           >
-            <Popover.Popup className={popupClass}>
-              <Popover.Title className="mb-2 text-[11px]">
-                Context · last reported
-              </Popover.Title>
-              <p className="mb-2">
-                {contextUsage
-                  ? `${contextUsage.used.toLocaleString()} / ${contextUsage.size.toLocaleString()} (${percent}%)`
-                  : "Context unavailable — not yet reported"}
-              </p>
-              <Popover.Description className="text-[10px] leading-4 text-muted-foreground">
-                Last Codex-reported context estimate; not cumulative billable
-                tokens or ChatGPT plan quota.
-              </Popover.Description>
-            </Popover.Popup>
-          </Popover.Positioner>
-        </Popover.Portal>
-      </Popover.Root>
+            {contextUsage && (
+              <progress
+                aria-label="Last reported context usage"
+                className="h-1 w-10 accent-primary"
+                max={contextUsage.size}
+                value={Math.min(contextUsage.used, contextUsage.size)}
+              />
+            )}
+            <span>context {percent === undefined ? "—" : `${percent}%`}</span>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Positioner
+              side="top"
+              align="end"
+              sideOffset={8}
+              className="z-50"
+            >
+              <Popover.Popup className={popupClass}>
+                <Popover.Title className="mb-2 text-[11px]">
+                  Context · last reported
+                </Popover.Title>
+                <p className="mb-2">
+                  {contextUsage
+                    ? `${contextUsage.used.toLocaleString()} / ${contextUsage.size.toLocaleString()} (${percent}%)`
+                    : "Context unavailable — not yet reported"}
+                </p>
+                <Popover.Description className="text-[10px] leading-4 text-muted-foreground">
+                  Last Codex-reported context estimate; not cumulative billable
+                  tokens or ChatGPT plan quota.
+                </Popover.Description>
+              </Popover.Popup>
+            </Popover.Positioner>
+          </Popover.Portal>
+        </Popover.Root>
+      )}
     </div>
   );
 }

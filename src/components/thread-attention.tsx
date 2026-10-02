@@ -49,6 +49,7 @@ export function ThreadAttentionInbox({ projects, threads, onSelect }: Props) {
       return kind && project ? [{ thread, project, kind }] : [];
     })
     .sort((a, b) => priority[a.kind] - priority[b.kind]);
+  if (!items.length && !store.activityError) return null;
   return (
     <section aria-label="Attention inbox" className="shrink-0 border-b text-xs">
       <div className="flex items-center justify-between px-3 py-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -63,11 +64,7 @@ export function ThreadAttentionInbox({ projects, threads, onSelect }: Props) {
           Updates unavailable · showing last known activity
         </p>
       )}
-      {!items.length ? (
-        <p className="px-3 pb-3 text-[11px] text-muted-foreground">
-          Nothing waiting across projects
-        </p>
-      ) : (
+      {items.length > 0 && (
         <ul className="max-h-60 overflow-y-auto px-1 pb-1">
           {items.map(({ thread, project, kind }) => (
             <li key={thread.id}>
