@@ -10,6 +10,13 @@ type Operation =
 // prompts, shell commands, and repository contents; never return or log them.
 const known = new Map<string, [string, string]>([
   [
+    "Workspace archive length is invalid.",
+    [
+      "workspace_archive_length",
+      "The backup archive could not be transferred safely. The previous checkpoint is retained. Recover the workspace from the conversation and share this reference with the operator; do not delete the thread.",
+    ],
+  ],
+  [
     "Workspace is stopped. Resume it before continuing.",
     [
       "workspace_stopped",

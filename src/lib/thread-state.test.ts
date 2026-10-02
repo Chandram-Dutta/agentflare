@@ -150,6 +150,36 @@ test("failed suspend restores the current view, exposes the error, and keeps the
   });
 });
 
+test("failed suspension reads the server state instead of advertising the old running workspace", async () => {
+  const calls: string[] = [];
+  const failed: AcpSnapshot = {
+    ...ready,
+    workspace: "failed",
+    interrupted: true,
+  };
+  const store = storeWith(async (path, method) => {
+    calls.push(`${method}:${path}`);
+    if (method === "POST") throw Error("Save failed after stopping Codex");
+    return failed;
+  });
+  store.update("a", {
+    runtime,
+    snapshot: { ...ready, workspace: "running" },
+    draft: "keep my draft",
+  });
+  expect(await store.action("a", { type: "suspend" })).toBe(false);
+  expect(store.get("a")).toMatchObject({
+    snapshot: failed,
+    draft: "keep my draft",
+    pending: false,
+    activity: { workspace: "failed" },
+  });
+  expect(calls).toEqual([
+    "POST:/threads/a/runtime/acp",
+    "GET:/threads/a/runtime/acp",
+  ]);
+});
+
 test("switching while saved-history requests overlap keeps responses isolated", async () => {
   const savedA = deferred<AcpSnapshot | null>();
   const savedB = deferred<AcpSnapshot | null>();

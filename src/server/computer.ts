@@ -25,6 +25,10 @@ import {
   type SealedCredentials,
 } from "./codex-credentials";
 
+declare const FixedLengthStream: new (
+  length: number,
+) => TransformStream<Uint8Array, Uint8Array>;
+
 // Account-scoped authentication, never part of a Computer filesystem or Artifacts repo.
 export class ComputerCredentials extends DurableObject<Bindings> {
   async read() {
@@ -147,6 +151,51 @@ export class ComputerThread extends withWorkspaceContainer(
           "Computer filesystem sync is incomplete. Retry before closing the thread.",
         );
     }
+  }
+  private async uploadArchive(response: Response, key: string) {
+    const header = response.headers.get("content-length");
+    const length = header === null ? NaN : Number(header);
+    if (
+      !response.body ||
+      !Number.isSafeInteger(length) ||
+      length <= 0 ||
+      length > 2 * 1024 ** 3
+    ) {
+      await response.body?.cancel();
+      throw Error("Workspace archive length is invalid.");
+    }
+    // HTTP headers alone do not give a forwarded stream the length R2 requires.
+    // FixedLengthStream also rejects truncated or oversized transfers.
+    const stream = new FixedLengthStream(length);
+    const abort = new AbortController();
+    const piping = response.body.pipeTo(stream.writable, {
+      signal: abort.signal,
+    });
+    try {
+      await Promise.all([
+        this.env.BACKUP_BUCKET!.put(key, stream.readable as never),
+        piping,
+      ]);
+    } catch (error) {
+      abort.abort();
+      await piping.catch(() => {});
+      throw error;
+    }
+  }
+  private async recordSaveFailure(stage: string, error: unknown) {
+    const failure = {
+      stage,
+      reference: crypto.randomUUID(),
+      at: new Date().toISOString(),
+    };
+    // Raw SDK errors may contain commands, credentials or repository content.
+    console.error({
+      event: "workspace_checkpoint_failed",
+      workspace: this.ctx.id.toString(),
+      ...failure,
+      errorType: error instanceof TypeError ? "TypeError" : "Error",
+    });
+    await this.ctx.storage.put("checkpoint-error", failure);
   }
   private prefix() {
     return `computer/${this.ctx.id}/`;
@@ -557,14 +606,17 @@ export class ComputerThread extends withWorkspaceContainer(
         (await this.ctx.storage.get("deleted"))
       )
         return;
+      let stage = "read-conversation";
       try {
         const state = await this.ctx.storage.get<State>("state");
         if (!state || (await this.lifecycle()) !== "running") return;
         const snapshot = await this.fetchSnapshot(state.id);
+        stage = "save-conversation";
         await this.remember(snapshot);
         if (busy(snapshot)) {
           // Incremental recovery only; do not advertise a consistent save while writers run.
           await this.ctx.storage.put("last-work", Date.now());
+          stage = "incremental-sync";
           await this.pull();
           return;
         }
@@ -572,9 +624,10 @@ export class ComputerThread extends withWorkspaceContainer(
           (await this.ctx.storage.get<number>("last-active")) ?? 0,
           (await this.ctx.storage.get<number>("last-work")) ?? 0,
         );
+        stage = "checkpoint";
         await this.checkpoint(state.id, Date.now() - lastActive >= 120_000);
-      } catch {
-        await this.ctx.storage.put("checkpoint-error", true);
+      } catch (error) {
+        if (stage !== "checkpoint") await this.recordSaveFailure(stage, error);
       } finally {
         if (this.ctx.container?.running)
           await this.ctx.storage.setAlarm(Date.now() + 30_000);
@@ -595,27 +648,36 @@ export class ComputerThread extends withWorkspaceContainer(
     this.saving = true;
     const prefix = `${this.prefix()}checkpoints/${crypto.randomUUID()}`;
     let committed = false;
+    let quiesced = false;
+    let stage = "quiesce";
     try {
       if (suspend) {
         await this.ctx.storage.put("lifecycle", "suspending");
-        if ((await this.bridge("/quiesce", "POST")).status !== 204)
+        // A lost response is ambiguous: only an explicit refusal proves it stayed alive.
+        quiesced = true;
+        const stopped = await this.bridge("/quiesce", "POST");
+        if (stopped.status === 409) quiesced = false;
+        if (stopped.status !== 204)
           throw Error(
             "Agent is busy. Wait for the current operation before suspending.",
           );
       }
+      stage = "save-conversation";
       await this.remember(snapshot);
+      stage = "filesystem-sync";
       await this.pull();
+      stage = "create-archive";
       const response = await this.bridge("/workspace-archive");
       if (!response.ok || !response.body)
         throw Error("Workspace archive failed.");
-      await this.env.BACKUP_BUCKET.put(
-        `${prefix}/workspace.tar.gz`,
-        response.body as never,
-      );
+      stage = "upload-archive";
+      await this.uploadArchive(response, `${prefix}/workspace.tar.gz`);
+      stage = "save-checkpoint-conversation";
       await this.env.BACKUP_BUCKET.put(
         `${prefix}/conversation.json`,
         JSON.stringify({ ...snapshot, permissions: [], login: undefined }),
       );
+      stage = "artifacts";
       const artifact = await this.checkpointArtifact();
       const checkpoint: Checkpoint = {
         id: prefix.split("/").at(-1)!,
@@ -628,6 +690,7 @@ export class ComputerThread extends withWorkspaceContainer(
       const obsolete = await this.ctx.storage.get<Checkpoint>(
         "previous-checkpoint",
       );
+      stage = "commit-checkpoint";
       await this.ctx.storage.put({
         checkpoint,
         ...(previous ? { "previous-checkpoint": previous } : {}),
@@ -640,15 +703,20 @@ export class ComputerThread extends withWorkspaceContainer(
           `${obsolete.prefix}/conversation.json`,
         ]).catch(() => {});
       if (suspend) {
+        stage = "stop-container";
         await this.computer.close();
         await this.ctx.container!.destroy();
         await this.ctx.storage.put("lifecycle", "suspended");
         await this.ctx.storage.deleteAlarm();
       }
     } catch (error) {
-      await this.ctx.storage.put("checkpoint-error", true);
+      await this.recordSaveFailure(stage, error);
       // A failed final save may have stopped Codex. Keep the disk, require explicit recovery.
-      if (suspend) await this.ctx.storage.put("lifecycle", "failed");
+      if (suspend)
+        await this.ctx.storage.put(
+          "lifecycle",
+          quiesced ? "failed" : "running",
+        );
       throw error;
     } finally {
       this.saving = false;

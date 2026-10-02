@@ -306,12 +306,38 @@ export class ThreadStateStore {
         this.update(id, { attachments: undefined });
       return true;
     } catch (error) {
+      let recoveredSnapshot = previousSnapshot;
+      if (action.type === "suspend" && previousSnapshot?.workspace) {
+        // The server may have quiesced Codex before a later save stage failed.
+        // Read the truth without reconnecting or replaying any action.
+        recoveredSnapshot = await this.request<AcpSnapshot>(
+          `/threads/${id}/runtime/acp`,
+          "GET",
+          undefined,
+          AbortSignal.timeout(15000),
+        ).catch(() => previousSnapshot);
+      }
       if (this.versions.get(id) === version)
         this.update(id, {
           error: (error as Error).message,
           ...((action.type === "connect" || action.type === "suspend") &&
           (previousSnapshot?.saved || previousSnapshot?.workspace)
-            ? { snapshot: previousSnapshot }
+            ? {
+                snapshot: recoveredSnapshot,
+                ...(recoveredSnapshot?.workspace
+                  ? {
+                      activity: {
+                        ...this.get(id).activity,
+                        status: recoveredSnapshot.status,
+                        attention:
+                          recoveredSnapshot.workspace === "failed" ||
+                          recoveredSnapshot.permissions.length > 0 ||
+                          Boolean(recoveredSnapshot.login),
+                        workspace: recoveredSnapshot.workspace,
+                      },
+                    }
+                  : {}),
+              }
             : {}),
         });
       return false;

@@ -87,6 +87,20 @@ test("Computer only destroys an idle runtime after pull and Artifacts succeed", 
   expect(active.saved?.workspace).toBe("running");
 });
 
+test("container archive streams with declared lengths can be saved to R2", async () => {
+  const result = await call("streamed-archive");
+  expect(result.saved?.persistence?.state).toBe("saved");
+  expect(result.archive).toBe("archive-bytes");
+  expect(result.events).toContain("destroy");
+  const truncated = await call("truncated-archive");
+  expect(truncated.events).not.toContain("destroy");
+  expect(truncated.checkpoint).toBeUndefined();
+  expect(truncated.failure).toMatchObject({ stage: "upload-archive" });
+  const refused = await call("quiesce-refused");
+  expect(refused.saved?.workspace).toBe("running");
+  expect(refused.events).toEqual(["quiesce"]);
+});
+
 test("failed sync/push never reports saved or destroys the only working copy", async () => {
   for (const mode of ["pull-fails", "skipped-file", "artifact-fails"]) {
     const result = await call(mode);
@@ -95,7 +109,7 @@ test("failed sync/push never reports saved or destroys the only working copy", a
     expect(result.saved?.persistence?.savedAt).toBeUndefined();
   }
   const retained = await call("failure-keeps-checkpoint");
-  expect(retained.checkpoint).toEqual(retained.observation);
+  expect(retained.observation).toEqual(retained.checkpoint);
   expect(retained.saved?.persistence?.state).toBe("error");
 });
 

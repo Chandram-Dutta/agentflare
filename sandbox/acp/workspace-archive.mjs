@@ -30,7 +30,10 @@ export function createWorkspaceArchive(
             status: 413,
           });
         return new Response(file, {
-          headers: { "Content-Type": "application/gzip" },
+          headers: {
+            "Content-Type": "application/gzip",
+            "Content-Length": String(file.size),
+          },
         });
       }
       if (request.method === "POST") {

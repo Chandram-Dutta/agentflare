@@ -112,13 +112,39 @@ export class TestComputer extends ComputerThread {
             await new Promise<void>((resolve) => {
               this.releaseArchive = resolve;
             });
-          return new Response("archive-bytes");
+          if (
+            this.mode === "streamed-archive" ||
+            this.mode === "truncated-archive"
+          ) {
+            const bytes = new TextEncoder().encode("archive-bytes");
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue(bytes);
+                  controller.close();
+                },
+              }),
+              {
+                headers: {
+                  "Content-Length": String(
+                    bytes.length + (this.mode === "truncated-archive" ? 1 : 0),
+                  ),
+                },
+              },
+            );
+          }
+          return new Response("archive-bytes", {
+            headers: { "Content-Length": "13" },
+          });
         }
         if (path === "/health") return new Response(null, { status: 204 });
         if (path === "/quiesce") {
           events.push("quiesce");
           return new Response(null, {
-            status: this.mode === "busy" ? 409 : 204,
+            status:
+              this.mode === "busy" || this.mode === "quiesce-refused"
+                ? 409
+                : 204,
           });
         }
         return Response.json({
@@ -205,11 +231,22 @@ export class TestComputer extends ComputerThread {
       observation = await this.ctx.storage.get("last-active");
     } else await this.alarm();
     await this.ctx.storage.deleteAlarm();
+    const checkpoint = await this.ctx.storage.get<{ prefix: string }>(
+      "checkpoint",
+    );
     return {
       events: this.events,
       deleted: await this.ctx.storage.get("deleted"),
       saved: await this.userSaved("thread"),
-      checkpoint: await this.ctx.storage.get("checkpoint"),
+      checkpoint,
+      archive: checkpoint
+        ? await (
+            await this.env.BACKUP_BUCKET!.get(
+              `${checkpoint.prefix}/workspace.tar.gz`,
+            )
+          )?.text()
+        : undefined,
+      failure: await this.ctx.storage.get("checkpoint-error"),
       observation,
       restorePending: await this.ctx.storage.get("restore-pending"),
     };
