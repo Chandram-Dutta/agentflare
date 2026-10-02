@@ -27,12 +27,13 @@ export function PublishChanges({
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [pending, setPending] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<PublishResult>();
   const published = result ?? review.published;
   const stale = target && target.revision !== review.revision;
   async function publish() {
-    if (!target || pending || stale) return;
+    if (!target || pending || stale || !confirmed) return;
     setPending(true);
     setError("");
     try {
@@ -68,6 +69,13 @@ export function PublishChanges({
           Open PR #{published.number} ↗
         </a>
       )}
+      <p className="text-muted-foreground text-[11px]">
+        {published
+          ? published.revision === review.revision
+            ? "This snapshot was published. CI status has not been fetched."
+            : "Local changes are not verified as published. Review before updating the PR."
+          : "Review changes → request fixes or create a draft PR → inspect CI on GitHub."}
+      </p>
       <Button
         variant="outline"
         className="w-full text-xs"
@@ -75,6 +83,7 @@ export function PublishChanges({
         onClick={() => {
           setTarget(review);
           setError("");
+          setConfirmed(false);
         }}
       >
         {published ? "Update PR" : "Create draft PR"}
@@ -90,9 +99,10 @@ export function PublishChanges({
             {published ? "Publish an update" : "Create draft PR"}
           </DialogTitle>
           <DialogDescription>
-            Publish all reviewed files as one snapshot commit. Local commits and
-            staging stay unchanged; their history is not copied. No force push.
-            Checks have not been verified by Agentflare.
+            Publish all changed files as one snapshot commit, including files
+            not marked reviewed. Local commits and staging stay unchanged; their
+            history is not copied. No force push. Checks have not been verified
+            by Agentflare.
           </DialogDescription>
           <p className="break-all text-xs">
             {target?.branch} → {target?.baseBranch}
@@ -110,6 +120,16 @@ export function PublishChanges({
               <p>Restores the branch to its original base snapshot.</p>
             )}
           </div>
+          <label className="flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={confirmed}
+              disabled={pending || !!stale}
+              onChange={(event) => setConfirmed(event.target.checked)}
+            />
+            I reviewed this snapshot and want to publish all listed changes.
+            This does not approve the PR or verify tests / CI.
+          </label>
           <label className="flex flex-col gap-1.5 text-xs">
             {published ? "Commit message" : "PR title / commit message"}
             <Input
@@ -152,7 +172,7 @@ export function PublishChanges({
               Cancel
             </Button>
             <Button
-              disabled={pending || !!stale || !title.trim()}
+              disabled={pending || !!stale || !title.trim() || !confirmed}
               onClick={() => void publish()}
             >
               {pending

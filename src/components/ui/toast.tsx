@@ -19,7 +19,7 @@ function ToastList() {
   const { toasts } = Toast.useToastManager();
   return (
     <Toast.Portal>
-      <Toast.Viewport className="fixed right-3 bottom-3 z-[100] flex w-[min(24rem,calc(100vw-1.5rem))] flex-col gap-2 outline-none">
+      <Toast.Viewport className="fixed right-3 top-14 z-[100] flex w-[min(24rem,calc(100vw-1.5rem))] flex-col gap-2 outline-none sm:top-auto sm:bottom-3">
         {toasts.map((item) => {
           const Icon =
             item.type === "loading"

@@ -10,6 +10,7 @@ import { resolve, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { runReviewTests } from "./review-tests.mjs";
 
 // Build a stable tree without changing the agent's index or working files.
 export function snapshotRepository(root, base, includeBlobs = false) {
@@ -85,7 +86,10 @@ export function snapshotRepository(root, base, includeBlobs = false) {
  * @returns {{ files?: string[], path?: string, content?: string, patch?: string,
  * changes?: object[], branch?: string, revision?: string, entries?: object[], blobs?: Record<string, string> }}
  */
-export function inspectRepository(root, { operation, path, staged, base = "" }) {
+export function inspectRepository(
+  root,
+  { operation, path, staged, base = "" },
+) {
   function checkedPath(path) {
     if (
       !path ||
@@ -125,8 +129,10 @@ export function inspectRepository(root, { operation, path, staged, base = "" }) 
       throw Error("Invalid path");
     const snapshot = snapshotRepository(root, base);
     result = {
+      revision: snapshot.revision,
       patch: git(
         "diff",
+        "--full-index",
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
@@ -210,12 +216,12 @@ if (
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   if (!process.argv[3]) throw Error("Repository root is required");
+  const input = JSON.parse(Buffer.from(process.argv[2], "base64").toString());
   process.stdout.write(
     JSON.stringify(
-      inspectRepository(
-        process.argv[3],
-        JSON.parse(Buffer.from(process.argv[2], "base64").toString()),
-      ),
+      input.operation === "test"
+        ? await runReviewTests(process.argv[3], input.base, input.revision)
+        : inspectRepository(process.argv[3], input),
     ),
   );
 }

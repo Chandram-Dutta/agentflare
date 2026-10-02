@@ -35,6 +35,25 @@ test("known runtime failures retain their cause and safe recovery guidance acros
   }
 });
 
+test("save failures recommend retry without reconnecting a live workspace or leaking provider details", () => {
+  const log = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const result = runtimeFailure(
+      new Error("private-provider-details"),
+      "save",
+    );
+    expect(result.code).toBe("save_failed");
+    expect(result.error).toContain("Retry save if the workspace is running");
+    expect(result.error).toContain("recover it if stopped");
+    expect(JSON.stringify(result)).not.toContain("private-provider-details");
+    expect(JSON.stringify(log.mock.calls)).not.toContain(
+      "private-provider-details",
+    );
+  } finally {
+    log.mockRestore();
+  }
+});
+
 test("untrusted errors and near-matching provider messages cannot leak into responses or logs", () => {
   const log = spyOn(console, "error").mockImplementation(() => {});
   try {

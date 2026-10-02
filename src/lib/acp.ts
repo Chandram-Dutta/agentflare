@@ -22,6 +22,7 @@ export type AcpActivity = {
 
 export type AcpSnapshot = {
   workspace?: WorkspaceLifecycle;
+  timings?: { startupMs?: number; resumeMs?: number };
   turnCancelled?: boolean;
   authScope?: "user";
   authPersistence?: "saved" | "pending";
@@ -31,6 +32,10 @@ export type AcpSnapshot = {
     state: "saved" | "saving" | "dirty" | "error" | "disabled";
     savedAt?: string;
     checkpointId?: string;
+    failure?: { stage: string; reference: string; at: string };
+    durationMs?: number;
+    checkedAt?: string;
+    unchanged?: boolean;
   };
   status:
     | "disconnected"
@@ -68,6 +73,7 @@ export type AcpSnapshot = {
 
 export type AcpAction =
   | { type: "connect" }
+  | { type: "checkpoint" }
   | { type: "suspend" }
   | { type: "authenticate" }
   | {

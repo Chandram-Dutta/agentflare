@@ -7,6 +7,7 @@ COPY sandbox/acp/package.json sandbox/acp/package-lock.json /opt/agentflare/acp/
 RUN cd /opt/agentflare/acp && npm ci --omit=dev --ignore-scripts
 COPY sandbox/acp/ /opt/agentflare/acp/
 COPY sandbox/repository.mjs /opt/agentflare/repository.mjs
+COPY sandbox/review-tests.mjs /opt/agentflare/review-tests.mjs
 ENV PORT=8080 MOUNT_POINT=/workspace FUSE_MOUNT=fuse
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/computerd"]

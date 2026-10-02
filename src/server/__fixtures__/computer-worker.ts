@@ -46,6 +46,7 @@ export class TestComputer extends ComputerThread {
   private events: string[] = [];
   private mode = "";
   private releaseArchive?: () => void;
+  private fileVersion = 0;
   constructor(ctx: DurableObjectState, env: Bindings) {
     super(ctx, env);
     const events = this.events;
@@ -105,9 +106,24 @@ export class TestComputer extends ComputerThread {
           }),
         },
       },
-      bridge: async (path: string) => {
+      bridge: async (
+        path: string,
+        _method?: string,
+        body?: { type: string },
+      ) => {
+        if (body) events.push(`action:${body.type}`);
         if (path === "/workspace-archive") {
+          if (_method === "HEAD")
+            return new Response(null, {
+              status: this.mode === "fingerprint-fails" ? 500 : 200,
+              headers: {
+                "X-Workspace-Fingerprint": this.fileVersion
+                  .toString(16)
+                  .padStart(64, "0"),
+              },
+            });
           events.push("archive");
+          if (this.mode === "changes-during-save") this.fileVersion++;
           if (this.mode === "slow-save")
             await new Promise<void>((resolve) => {
               this.releaseArchive = resolve;
@@ -168,7 +184,81 @@ export class TestComputer extends ComputerThread {
     let observation;
     if (["active", "slow-save", "failure-keeps-checkpoint"].includes(mode))
       await this.ctx.storage.put("last-active", Date.now());
-    if (mode.startsWith("delete")) {
+    if (mode === "startup-timing") {
+      await this.ctx.storage.delete("state");
+      Object.assign(this, {
+        exec: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return `origin/main\n${"a".repeat(40)}`;
+        },
+      });
+      await this.userStart(crypto.randomUUID(), {
+        owner: "alice",
+        repository: "https://test.invalid/repo",
+        branch: "test",
+        name: "test",
+        cloneToken: "synthetic-token",
+      });
+    } else if (mode === "manual-save" || mode === "manual-busy") {
+      if (mode === "manual-busy") this.mode = "busy";
+      try {
+        await this.userAcp("thread", { type: "checkpoint" });
+      } catch (error) {
+        observation = (error as Error).message;
+      }
+    } else if (mode === "retry-save") {
+      await this.userAcp("thread", { type: "checkpoint" });
+      const previous = await this.ctx.storage.get("checkpoint");
+      this.fileVersion++;
+      this.mode = "artifact-fails";
+      try {
+        await this.userAcp("thread", { type: "checkpoint" });
+      } catch {
+        observation = {
+          previous,
+          retained: await this.ctx.storage.get("checkpoint"),
+          failed: await this.userSaved("thread"),
+        };
+      }
+      this.mode = "active";
+      await this.userAcp("thread", { type: "checkpoint" });
+    } else if (
+      [
+        "unchanged-save",
+        "background-change",
+        "changes-during-save",
+        "unchanged-suspend",
+      ].includes(mode)
+    ) {
+      this.mode = "active";
+      await this.userAcp("thread", { type: "checkpoint" });
+      observation = await this.ctx.storage.get("checkpoint");
+      this.events.length = 0;
+      if (mode === "background-change" || mode === "changes-during-save")
+        this.fileVersion++;
+      this.mode = mode;
+      try {
+        await this.userAcp("thread", {
+          type: mode === "unchanged-suspend" ? "suspend" : "checkpoint",
+        });
+      } catch {
+        /* inspect consistency failure */
+      }
+    } else if (mode === "recover-live" || mode === "recover-live-pull-fails") {
+      this.mode = "pull-fails";
+      try {
+        await this.userAcp("thread", { type: "suspend" });
+      } catch {
+        /* the stopped agent still has its working disk */
+      }
+      this.events.length = 0;
+      if (mode === "recover-live") this.mode = "active";
+      try {
+        await this.userAcp("thread", { type: "connect" });
+      } catch {
+        /* a failed pull must prevent startup from overwriting files */
+      }
+    } else if (mode.startsWith("delete")) {
       try {
         await this.userDelete("thread");
       } catch {
@@ -215,6 +305,7 @@ export class TestComputer extends ComputerThread {
     } else if (mode === "failure-keeps-checkpoint") {
       await this.alarm();
       observation = await this.ctx.storage.get("checkpoint");
+      this.fileVersion++;
       this.mode = "artifact-fails";
       await this.alarm();
     } else if (mode === "resume-suspended" || mode === "restore-fails") {
@@ -249,6 +340,7 @@ export class TestComputer extends ComputerThread {
       failure: await this.ctx.storage.get("checkpoint-error"),
       observation,
       restorePending: await this.ctx.storage.get("restore-pending"),
+      startupMs: await this.ctx.storage.get<number>("startup-ms"),
     };
   }
 }

@@ -8,7 +8,13 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { Circle, CircleCheck, CircleAlert, LoaderCircle } from "lucide-react";
+import {
+  Circle,
+  CircleCheck,
+  CircleAlert,
+  LoaderCircle,
+  Pause,
+} from "lucide-react";
 import { ThreadStateStore, activityLabel } from "@/lib/thread-state";
 
 const Context = createContext<ThreadStateStore | null>(null);
@@ -18,24 +24,41 @@ export function ThreadStateProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     let activityAt = 0;
+    let conversationAt = 0;
+    let conversationId: string | undefined;
     let running = false;
     async function tick() {
       if (cancelled || running) return;
       running = true;
       if (!document.hidden || store.notificationsEnabled) {
         if (Date.now() >= activityAt) {
-          activityAt = Date.now() + (document.hidden ? 10000 : 3000);
+          activityAt = Date.now() + (document.hidden ? 15000 : 3000);
           await store.pollActivity();
         }
-        if (!cancelled && !document.hidden && store.active)
+        if (
+          !cancelled &&
+          !document.hidden &&
+          store.active &&
+          (conversationId !== store.active || Date.now() >= conversationAt)
+        ) {
+          conversationId = store.active;
+          const state = store.get(store.active);
+          const busy =
+            state.pending ||
+            state.activity?.status === "running" ||
+            state.activity?.status === "connecting";
+          conversationAt = Date.now() + (busy ? 1000 : 5000);
           await store.pollConversation(store.active);
+        }
       }
       running = false;
       if (!cancelled) timer = setTimeout(tick, 1000);
     }
     const visible = () => {
+      store.select(store.active, !document.hidden);
       if (!document.hidden) {
         activityAt = 0;
+        conversationAt = 0;
         clearTimeout(timer);
         void tick();
       }
@@ -97,21 +120,37 @@ export function ThreadActivity({
   );
 }
 
-function ActivityBadge({ label, count }: { label: string; count?: number }) {
-  const Icon =
-    label === "running" || label === "connecting" || label === "configuring"
-      ? LoaderCircle
-      : label === "finished"
-        ? CircleCheck
-        : ["needs attention", "error", "unknown"].includes(label)
-          ? CircleAlert
+export function ActivityBadge({
+  label,
+  count,
+}: {
+  label: string;
+  count?: number;
+}) {
+  const Icon = [
+    "working",
+    "connecting",
+    "configuring",
+    "saving",
+    "sending",
+    "stopping",
+    "recovering",
+    "starting",
+  ].includes(label)
+    ? LoaderCircle
+    : label === "finished"
+      ? CircleCheck
+      : ["waiting for user", "failed", "unknown"].includes(label)
+        ? CircleAlert
+        : label === "suspended"
+          ? Pause
           : Circle;
   const title = count === undefined ? label : `${count} ${label}`;
   return (
     <span
       title={title}
       aria-label={title}
-      className={`inline-flex items-center gap-1.5 text-[10px] ${label === "finished" ? "text-emerald-600 dark:text-emerald-400" : ["needs attention", "error"].includes(label) ? "text-primary" : "text-muted-foreground"}`}
+      className={`inline-flex items-center gap-1.5 text-[10px] ${label === "finished" ? "text-emerald-600 dark:text-emerald-400" : label === "failed" ? "text-destructive" : label === "waiting for user" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}
     >
       <Icon
         aria-hidden="true"

@@ -276,9 +276,15 @@ export class UserRuntime {
       this.starting.delete(id);
     }
   }
-  inspect(id: string, operation: string, path = "", staged = false) {
+  inspect(
+    id: string,
+    operation: string,
+    path = "",
+    staged = false,
+    revision?: string,
+  ) {
     return this.interactive(() =>
-      this.inspectUnlocked(id, operation, path, staged),
+      this.inspectUnlocked(id, operation, path, staged, revision),
     );
   }
   private async inspectUnlocked(
@@ -286,15 +292,22 @@ export class UserRuntime {
     operation: string,
     path = "",
     staged = false,
+    revision?: string,
   ) {
     await this.require(id);
     const state = (await this.storage.get<Workspace>(`workspace:${id}`))!;
     const input = Buffer.from(
-      JSON.stringify({ operation, path, staged, base: state.baseSha }),
+      JSON.stringify({
+        operation,
+        path,
+        staged,
+        base: state.baseSha,
+        revision,
+      }),
     ).toString("base64");
     const result = await this.sandbox.exec(
       `node /opt/agentflare/repository.mjs ${quote(input)} ${quote(`${this.root(id)}/repo`)}`,
-      { timeout: 15000 },
+      { timeout: operation === "test" ? 90000 : 15000 },
     );
     if (!result.success) throw Error("Repository operation failed.");
     return JSON.parse(result.stdout);

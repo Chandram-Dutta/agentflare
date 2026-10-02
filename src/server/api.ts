@@ -479,6 +479,7 @@ api.get("/activity", async (c) => {
 
 const acpAction = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("connect") }),
+  z.strictObject({ type: z.literal("checkpoint") }),
   z.strictObject({ type: z.literal("suspend") }),
   z.strictObject({ type: z.literal("authenticate") }),
   z.strictObject({
@@ -543,9 +544,15 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
     if (!parsed.success) return c.json({ error: "Invalid ACP action." }, 400);
     action = parsed.data;
   }
-  if (action?.type === "suspend" && owned.runtime !== "computer")
+  if (
+    (action?.type === "suspend" || action?.type === "checkpoint") &&
+    owned.runtime !== "computer"
+  )
     return c.json(
-      { error: "Explicit suspension is available for Computer threads." },
+      {
+        error:
+          "Explicit saving and suspension are available for Computer threads.",
+      },
       409,
     );
   const sandbox = await runtime(c.env, c.get("user").id, owned, Boolean(action));
@@ -558,7 +565,15 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
     }
     return c.json(await sandbox.userAcp(owned.id, action));
   } catch (error) {
-    return c.json(runtimeFailure(error, "connect"), 409);
+    return c.json(
+      runtimeFailure(
+        error,
+        action?.type === "checkpoint" || action?.type === "suspend"
+          ? "save"
+          : "connect",
+      ),
+      409,
+    );
   }
 });
 
@@ -569,7 +584,7 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
   if (
     !(
       method === "POST"
-        ? ["start", "publish"]
+        ? ["start", "publish", "test"]
         : ["status", "files", "file", "git", "diff", "review", "branch-diff"]
     ).includes(operation)
   )
@@ -602,6 +617,32 @@ api.on(["GET", "POST"], "/threads/:id/runtime/:operation", async (c) => {
   }
   const sandbox = await runtime(c.env, c.get("user").id, owned, true);
   if (operation === "status") return c.json(await sandbox.userStatus(owned.id));
+  if (operation === "test") {
+    const parsed = z
+      .strictObject({ revision: z.string().regex(/^[a-f0-9]{40}$/) })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success)
+      return c.json({ error: "A current review revision is required." }, 400);
+    try {
+      return c.json(
+        await sandbox.userInspect(
+          owned.id,
+          "test",
+          "",
+          false,
+          parsed.data.revision,
+        ),
+      );
+    } catch {
+      return c.json(
+        {
+          error:
+            "Tests unavailable or checkout changed. Refresh the review before retrying; no result was recorded.",
+        },
+        409,
+      );
+    }
+  }
   if (operation === "publish") {
     const parsed = z
       .strictObject({

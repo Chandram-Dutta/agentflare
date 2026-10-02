@@ -26,6 +26,38 @@ function harness(paths = ["a", "b", "c", "d", "e", "f"]) {
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+test("live diffs from a different tree or without revision evidence cannot be reviewed", async () => {
+  for (const revision of [undefined, "new-tree"]) {
+    const events: DiffResult[] = [];
+    loadBranchDiffs(
+      "/runtime",
+      ["file"],
+      (_, result) => events.push(result),
+      async () => ({ patch: "+not the reviewed tree", revision }),
+      "expected-tree",
+    );
+    await tick();
+    expect(events.at(-1)).toEqual({
+      state: "error",
+      message: "The checkout changed. Refresh the review before continuing.",
+    });
+  }
+  const events: DiffResult[] = [];
+  loadBranchDiffs(
+    "/runtime",
+    ["file"],
+    (_, result) => events.push(result),
+    async () => ({ patch: "+exact", revision: "expected-tree" }),
+    "expected-tree",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(events.at(-1)).toMatchObject({
+    state: "ready",
+    patch: "+exact",
+    fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+  });
+});
+
 test("four concurrent requests; out-of-order results publish progressively and release one slot", async () => {
   const { requests, events, loader } = harness();
   expect(requests).toHaveLength(4);

@@ -44,11 +44,12 @@ export function showThreadNotification(
   // A notification failure must never interrupt workspace updates.
   try {
     const notification = new Notification(
-      event.kind === "finished"
-        ? "Codex finished"
-        : "Codex needs your attention",
+      `${label} — ${event.kind === "finished" ? "finished" : "waiting for you"}`,
       {
-        body: `${label} — ${event.kind === "finished" ? "Your turn is complete." : "An approval or sign-in is waiting."}`,
+        body:
+          event.kind === "finished"
+            ? "Codex finished this turn."
+            : "Codex is waiting for an approval or sign-in.",
         tag: `agentflare-${event.threadId}-${event.kind}`,
         icon: "/icon.png",
       },

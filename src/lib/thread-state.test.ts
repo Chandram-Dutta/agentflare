@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ThreadStateStore, activityLabel } from "./thread-state";
+import { ThreadStateStore, activityLabel, attentionKind } from "./thread-state";
 import type { AcpSnapshot, AcpActivity } from "./acp";
 import type { ThreadNotification } from "./thread-notifications";
 import type { apiRequest } from "./api-client";
@@ -21,7 +21,14 @@ const runtime = { started: true, agent: "codex" as const };
 function storeWith(
   request: (...args: Parameters<typeof apiRequest>) => Promise<unknown>,
 ) {
-  return new ThreadStateStore(request as typeof apiRequest);
+  return new ThreadStateStore((async (
+    ...args: Parameters<typeof apiRequest>
+  ) => {
+    const value = await request(...args);
+    return args[0].includes("transport=delta")
+      ? { revision: crypto.randomUUID(), snapshot: value }
+      : value;
+  }) as typeof apiRequest);
 }
 
 test("accepted rich sends clear submitted attachments and preserve newer attachments", async () => {
@@ -74,6 +81,7 @@ test("switching shares an in-flight connect and retains isolated drafts and snap
     "GET:/threads/a/runtime/status",
     "GET:/threads/a/runtime/saved",
     "POST:/threads/a/runtime/acp",
+    "GET:/threads/a/runtime/acp?transport=delta",
   ]);
   expect(store.get("a")).toMatchObject({
     draft: "unfinished A",
@@ -124,7 +132,7 @@ test("stopped Computers stay asleep until explicit resume, and observe another c
     activity: { status: "ready", attention: false, workspace: "running" },
   });
   await store.pollConversation("a");
-  expect(calls.at(-1)).toBe("GET:/threads/a/runtime/acp");
+  expect(calls.at(-1)).toBe("GET:/threads/a/runtime/acp?transport=delta");
   expect(store.get("a").snapshot?.workspace).toBe("running");
   expect(calls.some((call) => call.startsWith("POST:"))).toBe(false);
 });
@@ -138,7 +146,7 @@ test("failed suspend restores the current view, exposes the error, and keeps the
   const snapshot: AcpSnapshot = { ...ready, workspace: "running" };
   store.update("a", { runtime, snapshot, draft: "keep this" });
   const saving = store.action("a", { type: "suspend" });
-  expect(activityLabel(store.get("a"))).toBe("suspending");
+  expect(activityLabel(store.get("a"))).toBe("saving");
   expect(store.get("a").snapshot?.persistence?.state).toBe("saving");
   response.resolve(ready);
   await saving;
@@ -278,10 +286,10 @@ test("background completion and permissions are discovered without connecting th
   });
   store.select("b");
   await store.pollActivity();
-  expect(activityLabel(store.get("a"))).toBe("needs attention");
+  expect(activityLabel(store.get("a"))).toBe("waiting for user");
   attention = false;
   await store.pollActivity();
-  expect(activityLabel(store.get("a"))).toBe("running");
+  expect(activityLabel(store.get("a"))).toBe("working");
   status = "ready";
   await store.pollActivity();
   expect(activityLabel(store.get("a"))).toBe("finished");
@@ -291,7 +299,8 @@ test("background completion and permissions are discovered without connecting th
   expect(activityLabel(store.get("a"))).toBe("finished");
   store.select("a");
   await store.pollActivity();
-  expect(activityLabel(store.get("a"))).toBe("ready");
+  expect(activityLabel(store.get("a"))).toBe("finished");
+  expect(attentionKind(store.get("a"))).toBeUndefined();
   expect(calls.every((path) => path === "/activity")).toBe(true);
   expect(store.get("a").runtime).toBeUndefined();
 });
@@ -313,7 +322,7 @@ test("stale activity cannot regress a newer snapshot or resurrect a deleted thre
     b: { status: "running", attention: false },
   });
   await poll;
-  expect(activityLabel(store.get("a"))).toBe("running");
+  expect(activityLabel(store.get("a"))).toBe("working");
   expect(store.get("b").activity).toBeUndefined();
   await store.pollActivity();
   expect(store.get("b").activity).toBeUndefined();
@@ -345,7 +354,7 @@ test("failed activity is unknown, retries recover, and a lost bridge is not comp
   expect(activityLabel(store.get("a"), store.activityError)).toBe("unknown");
   fail = false;
   await store.pollActivity();
-  expect(activityLabel(store.get("a"), store.activityError)).toBe("running");
+  expect(activityLabel(store.get("a"), store.activityError)).toBe("working");
   exists = false;
   await store.pollActivity();
   expect(activityLabel(store.get("a"))).toBe("not connected");
@@ -464,4 +473,144 @@ test("another client's cancelled turn does not notify, but its next completed tu
   await store.pollActivity();
   await store.pollActivity();
   expect(events).toEqual([{ threadId: "a", kind: "finished" }]);
+});
+
+test("cached views remain synchronous while refreshes race; the newest response wins", async () => {
+  const first = deferred<AcpSnapshot>();
+  const second = deferred<AcpSnapshot>();
+  let calls = 0;
+  const store = storeWith(async () =>
+    ++calls === 1 ? first.promise : second.promise,
+  );
+  const repository = {
+    files: ["a.ts"],
+    changes: [],
+    tab: "files",
+    view: { path: "a.ts", label: "a.ts", content: "cached source" },
+  };
+  store.update("a", { runtime, hydrated: true, snapshot: running, repository });
+  const old = store.ensure("a");
+  store.select("b");
+  store.select("a");
+  const recent = store.ensure("a");
+  expect(store.get("a").snapshot).toBe(running);
+  expect(store.get("a").repository).toBe(repository);
+  second.resolve({ ...running, status: "ready" });
+  await recent;
+  first.resolve(running);
+  await old;
+  expect(activityLabel(store.get("a"))).toBe("finished");
+  expect(store.get("a").repository).toBe(repository);
+});
+
+test("a late activity failure cannot replace a newer successful observation", async () => {
+  const gate = deferred<void>();
+  let calls = 0;
+  const store = storeWith(async () => {
+    if (++calls === 1) {
+      await gate.promise;
+      throw Error("old network failure");
+    }
+    return { a: { status: "running", attention: true, attentionId: "p1" } };
+  });
+  const old = store.pollActivity();
+  await store.pollActivity();
+  gate.resolve();
+  await old;
+  expect(store.activityError).toBe(false);
+  expect(attentionKind(store.get("a"))).toBe("approval");
+});
+
+test("checkpoint saves without suspension and recovers truth after failure without replay", async () => {
+  const gate = deferred<void>();
+  const calls: string[] = [];
+  const failed: AcpSnapshot = {
+    ...running,
+    workspace: "running",
+    persistence: { state: "error" },
+  };
+  const store = storeWith(async (path, method) => {
+    calls.push(`${method}:${path}`);
+    if (method === "POST") {
+      await gate.promise;
+      throw Error("Checkpoint upload failed");
+    }
+    return failed;
+  });
+  store.update("a", {
+    runtime,
+    snapshot: { ...running, workspace: "running" },
+    draft: "next instruction",
+  });
+  const saving = store.action("a", { type: "checkpoint" });
+  expect(activityLabel(store.get("a"))).toBe("saving");
+  expect(store.get("a").snapshot?.workspace).toBe("running");
+  gate.resolve();
+  expect(await saving).toBe(false);
+  expect(store.get("a").snapshot).toEqual(failed);
+  expect(store.get("a").draft).toBe("next instruction");
+  expect(attentionKind(store.get("a"))).toBe("failure");
+  expect(calls).toEqual([
+    "POST:/threads/a/runtime/acp",
+    "GET:/threads/a/runtime/acp",
+  ]);
+});
+
+test("transport cursor resets after stale deltas and actions, without losing display history", async () => {
+  const paths: string[] = [];
+  const responses: unknown[] = [
+    { revision: "r1", snapshot: running },
+    { revision: "r3", base: "wrong", start: 0, remove: 0, insert: "" },
+    { revision: "r4", snapshot: { ...running, status: "ready" } },
+    running,
+    { revision: "r5", snapshot: running },
+  ];
+  const store = new ThreadStateStore((async (path: string) => {
+    paths.push(path);
+    return responses.shift();
+  }) as typeof apiRequest);
+  store.update("a", { runtime, snapshot: ready });
+  await store.pollConversation("a");
+  await store.pollConversation("a");
+  expect(store.get("a").snapshot).toBe(running);
+  expect(store.get("a").error).toContain("Stale conversation");
+  await store.pollConversation("a");
+  await store.action("a", { type: "prompt", requestId: "next", text: "next" });
+  await store.pollConversation("a");
+  expect(paths).toEqual([
+    "/threads/a/runtime/acp?transport=delta",
+    "/threads/a/runtime/acp?transport=delta&revision=r1",
+    "/threads/a/runtime/acp?transport=delta",
+    "/threads/a/runtime/acp",
+    "/threads/a/runtime/acp?transport=delta",
+  ]);
+  expect(store.get("a").error).toBe("");
+});
+
+test("late conversation reads cannot regress background completion or re-add acknowledged results", async () => {
+  const old = deferred<AcpSnapshot>();
+  let activity: AcpActivity = {
+    status: "running",
+    attention: false,
+    turn: "turn-1",
+  };
+  const store = storeWith(async (path) =>
+    path === "/activity" ? { a: activity } : old.promise,
+  );
+  store.update("a", { runtime, snapshot: running });
+  await store.pollActivity();
+  const reading = store.pollConversation("a");
+  activity = { ...activity, status: "ready" };
+  await store.pollActivity();
+  old.resolve(running);
+  await reading;
+  expect(activityLabel(store.get("a"))).toBe("finished");
+  expect(attentionKind(store.get("a"))).toBe("finished");
+  store.select("a");
+  store.select("b");
+  activity = { ...activity, status: "running" };
+  await store.pollActivity();
+  activity = { ...activity, status: "ready" };
+  await store.pollActivity();
+  expect(attentionKind(store.get("a"))).toBeUndefined();
 });

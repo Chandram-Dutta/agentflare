@@ -15,7 +15,12 @@ export type RuntimeState = {
 export type RepositoryFile = { path: string; content: string };
 export type GitChange = { path: string; index: string; worktree: string };
 
-export type PublishResult = { sha: string; url: string; number: number };
+export type PublishResult = {
+  sha: string;
+  url: string;
+  number: number;
+  revision?: string;
+};
 export type BranchReview = {
   revision: string;
   branch: string;

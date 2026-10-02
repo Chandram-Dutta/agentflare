@@ -71,8 +71,8 @@ test("Computer only destroys an idle runtime after pull and Artifacts succeed", 
   expect(result.events).toEqual([
     "quiesce",
     "pull",
-    "archive",
     "artifact",
+    "archive",
     "close",
     "destroy",
   ]);
@@ -83,7 +83,7 @@ test("Computer only destroys an idle runtime after pull and Artifacts succeed", 
   expect(busy.events).toEqual(["pull"]);
   expect(busy.saved?.persistence?.state).toBe("dirty");
   const active = await call("active");
-  expect(active.events).toEqual(["pull", "archive", "artifact"]);
+  expect(active.events).toEqual(["pull", "artifact", "archive"]);
   expect(active.saved?.workspace).toBe("running");
 });
 
@@ -101,8 +101,105 @@ test("container archive streams with declared lengths can be saved to R2", async
   expect(refused.events).toEqual(["quiesce"]);
 });
 
+test("explicit checkpoints keep the runtime live and refuse busy writers", async () => {
+  const saved = await call("manual-save");
+  expect(saved.events).toEqual(["pull", "artifact", "archive"]);
+  expect(saved.saved).toMatchObject({
+    workspace: "running",
+    persistence: { state: "saved" },
+  });
+  const busy = await call("manual-busy");
+  expect(busy.events).toEqual([]);
+  expect(busy.checkpoint).toBeUndefined();
+  expect(busy.observation).toContain("before saving or suspending");
+});
+
+test("startup timing measures actual initialization rather than an estimated delay", async () => {
+  const result = await call("startup-timing");
+  expect(result.startupMs).toBeGreaterThanOrEqual(20);
+});
+
+test("retry save retains the previous checkpoint and clears failure without restart or prompt replay", async () => {
+  const result = await call("retry-save");
+  const observation = result.observation as {
+    previous: unknown;
+    retained: unknown;
+    failed: unknown;
+  };
+  expect(observation.previous).toEqual(observation.retained);
+  expect(observation.failed).toMatchObject({
+    workspace: "running",
+    persistence: {
+      state: "error",
+      failure: {
+        stage: "artifacts",
+        reference: expect.any(String),
+        at: expect.any(String),
+      },
+    },
+  });
+  expect(result.saved).toMatchObject({
+    workspace: "running",
+    persistence: { state: "saved" },
+  });
+  expect(result.saved?.persistence?.failure).toBeUndefined();
+  expect(result.checkpoint).not.toEqual(observation.previous);
+  expect(result.events).toEqual([
+    "pull",
+    "artifact",
+    "archive",
+    "pull",
+    "artifact",
+    "pull",
+    "artifact",
+    "archive",
+  ]);
+});
+
+test("unchanged files reuse the checkpoint without archive or Artifacts work, but idle background changes do not", async () => {
+  const unchanged = await call("unchanged-save");
+  expect(unchanged.events).toEqual(["pull"]);
+  expect(unchanged.observation).toEqual(unchanged.checkpoint);
+  expect(unchanged.saved?.persistence?.unchanged).toBe(true);
+  expect(unchanged.saved?.persistence?.durationMs).toBeGreaterThanOrEqual(0);
+  const changed = await call("background-change");
+  expect(changed.events).toEqual(["pull", "artifact", "archive"]);
+  expect(changed.checkpoint).not.toEqual(changed.observation);
+  expect(changed.saved?.persistence?.unchanged).toBe(false);
+  const suspended = await call("unchanged-suspend");
+  expect(suspended.events).toEqual(["quiesce", "pull", "close", "destroy"]);
+  expect(suspended.saved?.workspace).toBe("suspended");
+});
+
+test("files changing during archiving never replace the last checkpoint", async () => {
+  const result = await call("changes-during-save");
+  expect(result.observation).toEqual(result.checkpoint);
+  expect(result.saved).toMatchObject({
+    workspace: "running",
+    persistence: { state: "error", failure: { stage: "verify-files" } },
+  });
+  expect(result.saved?.persistence?.durationMs).toBeGreaterThanOrEqual(0);
+  expect(result.events).not.toContain("destroy");
+});
+
+test("recovering a failed suspend pulls surviving files before startup and never restores an older archive", async () => {
+  const recovered = await call("recover-live");
+  expect(recovered.events).toEqual(["pull", "ensure", "action:connect"]);
+  expect(recovered.saved?.workspace).toBe("running");
+  expect(recovered.saved?.timings?.resumeMs).toBeGreaterThanOrEqual(10);
+  const blocked = await call("recover-live-pull-fails");
+  expect(blocked.events).toEqual(["pull"]);
+  expect(blocked.saved?.workspace).toBe("failed");
+  expect(blocked.saved?.timings?.resumeMs).toBeGreaterThanOrEqual(0);
+});
+
 test("failed sync/push never reports saved or destroys the only working copy", async () => {
-  for (const mode of ["pull-fails", "skipped-file", "artifact-fails"]) {
+  for (const mode of [
+    "pull-fails",
+    "skipped-file",
+    "artifact-fails",
+    "fingerprint-fails",
+  ]) {
     const result = await call(mode);
     expect(result.events).not.toContain("destroy");
     expect(result.saved?.persistence?.state).toBe("error");

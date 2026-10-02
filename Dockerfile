@@ -7,3 +7,4 @@ COPY sandbox/acp/auth-checkpoint.mjs /opt/agentflare/acp/auth-checkpoint.mjs
 COPY sandbox/acp/checkpoint-loop.mjs /opt/agentflare/acp/checkpoint-loop.mjs
 COPY sandbox/acp/snapshot-transport.mjs /opt/agentflare/acp/snapshot-transport.mjs
 COPY sandbox/repository.mjs /opt/agentflare/repository.mjs
+COPY sandbox/review-tests.mjs /opt/agentflare/review-tests.mjs

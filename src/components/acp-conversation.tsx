@@ -7,7 +7,15 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { ArrowUp, Bot, LogOut, Square, RotateCcw, Save } from "lucide-react";
+import {
+  ArrowUp,
+  Bot,
+  LogOut,
+  Square,
+  RotateCcw,
+  Save,
+  Pause,
+} from "lucide-react";
 import { createPortal } from "react-dom";
 import { Button } from "./ui/button";
 import { AcpMessages } from "./acp-messages";
@@ -18,6 +26,7 @@ import { promptActionSchema } from "@/lib/acp-content";
 import type { RepositoryLinkProps } from "./chat-markdown";
 import type { AcpAction } from "@/lib/acp";
 import { useThreadStore, useThreadState } from "./thread-state";
+import { toast } from "./ui/toast";
 
 function safeLoginUrl(value: string): string | null {
   try {
@@ -37,13 +46,16 @@ export function AcpConversation({
   threadId,
   headerTarget,
   onOpenFile,
+  onReviewChanges,
 }: {
   threadId: string;
   headerTarget?: HTMLDivElement | null;
+  onReviewChanges?: () => void;
 } & RepositoryLinkProps) {
   const store = useThreadStore();
   const [attachmentReading, setAttachmentReading] = useState(false);
   const [sendError, setSendError] = useState("");
+  const [now, setNow] = useState(() => Date.now());
   const {
     snapshot,
     draft: prompt,
@@ -53,6 +65,43 @@ export function AcpConversation({
   } = useThreadState(threadId);
   const transcript = useRef<HTMLDivElement>(null);
   const action = (value: AcpAction) => store.action(threadId, value);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  async function saveWorkspace(type: "checkpoint" | "suspend") {
+    let pendingToast: string | undefined;
+    const timer = setTimeout(() => {
+      pendingToast = toast.add({
+        title:
+          type === "checkpoint"
+            ? "Saving checkpoint…"
+            : "Saving and suspending…",
+        type: "loading",
+        timeout: 0,
+      });
+    }, 300);
+    try {
+      const ok = await action({ type });
+      setNow(Date.now());
+      toast.add({
+        title: ok
+          ? type === "checkpoint"
+            ? "Checkpoint saved"
+            : "Workspace suspended"
+          : "Workspace save failed",
+        type: ok ? "success" : "error",
+        description: ok
+          ? type === "checkpoint"
+            ? "Your workspace is still running."
+            : "Resume when you are ready to continue."
+          : store.get(threadId).error,
+      });
+    } finally {
+      clearTimeout(timer);
+      if (pendingToast) toast.close(pendingToast);
+    }
+  }
   useLayoutEffect(() => {
     const element = transcript.current;
     if (element)
@@ -123,26 +172,46 @@ export function AcpConversation({
         : snapshot.workspace
       : saved
         ? "saved"
-        : networkError
+        : networkError && snapshot?.persistence?.state !== "error"
           ? "disconnected"
           : (snapshot?.status ?? "loading");
   const persistence = snapshot?.persistence;
   const savedAt = persistence?.savedAt
     ? new Date(persistence.savedAt).toLocaleString()
     : undefined;
+  const ageMinutes = persistence?.savedAt
+    ? Math.max(0, Math.floor((now - Date.parse(persistence.savedAt)) / 60_000))
+    : 0;
+  const checkpointAge = savedAt
+    ? ageMinutes < 1
+      ? "just now"
+      : ageMinutes < 60
+        ? `${ageMinutes}m ago`
+        : ageMinutes < 1440
+          ? `${Math.floor(ageMinutes / 60)}h ago`
+          : `${Math.floor(ageMinutes / 1440)}d ago`
+    : "no checkpoint yet";
+  const canSave =
+    snapshot?.workspace === "running" &&
+    !["running", "connecting", "configuring", "authenticating"].includes(
+      snapshot.status,
+    ) &&
+    !snapshot.permissions.length &&
+    !snapshot.login;
+  const savePending = persistence?.state === "saving";
   const persistenceLabel = persistence
     ? persistence.state === "saved"
-      ? "workspace saved"
+      ? `saved ${checkpointAge}`
       : persistence.state === "saving"
-        ? "save pending"
+        ? "saving checkpoint…"
         : persistence.state === "error"
-          ? "workspace save failed"
+          ? "save failed"
           : persistence.state === "dirty"
-            ? "unsaved changes"
+            ? "checkpoint pending"
             : "workspace saving disabled"
     : undefined;
   const controls = (
-    <div className="flex items-center gap-1 text-muted-foreground">
+    <div className="flex flex-wrap items-center justify-end gap-1 text-muted-foreground">
       <span
         role="status"
         aria-label={`Codex: ${status}`}
@@ -156,11 +225,12 @@ export function AcpConversation({
         />
         <span>{status}</span>
       </span>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
         {persistenceLabel && (
           <span
             className="hidden items-center gap-1 text-[10px] text-muted-foreground sm:flex"
-            title={`Workspace checkpoint: ${persistenceLabel}. ${savedAt ? `Last complete save: ${savedAt}. ` : ""}${persistence?.checkpointId ? `Checkpoint ${persistence.checkpointId}. ` : ""}Active work syncs incrementally. Complete workspace checkpoints are made while the agent is idle; save and suspend stops the agent only after it is idle.`}
+            role="status"
+            title={`Workspace checkpoint: ${persistenceLabel}. ${savedAt ? `Last complete save: ${savedAt}. ` : "No successful checkpoint yet. "}${persistence?.checkpointId ? `Checkpoint ${persistence.checkpointId}. ` : ""}Save checkpoint keeps the workspace running. Suspend saves first, then stops it. Checkpoints restore files, not running processes.`}
           >
             <Save className="size-3" aria-hidden="true" />
             {persistenceLabel}
@@ -198,17 +268,36 @@ export function AcpConversation({
           </Button>
         )}
         {snapshot?.workspace === "running" &&
-          (idle || snapshot.status === "auth-required") && (
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label="Save and suspend workspace"
-              title="Save and suspend workspace"
-              disabled={actionPending}
-              onClick={() => void action({ type: "suspend" })}
-            >
-              <Save className="size-3" aria-hidden="true" />
-            </Button>
+          persistence?.state !== "disabled" && (
+            <>
+              <Button
+                variant="ghost"
+                size="xs"
+                title={
+                  canSave
+                    ? "Save files without stopping the workspace"
+                    : "Wait for the agent to finish or stop the current operation before saving"
+                }
+                disabled={actionPending || savePending || !canSave}
+                onClick={() => void saveWorkspace("checkpoint")}
+              >
+                <Save className="size-3" aria-hidden="true" />
+                {persistence?.state === "error"
+                  ? "Retry save"
+                  : "Save checkpoint"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                aria-label="Suspend workspace"
+                title="Save a checkpoint, then stop the workspace"
+                disabled={actionPending || savePending || !canSave}
+                onClick={() => void saveWorkspace("suspend")}
+              >
+                <Pause className="size-3" aria-hidden="true" />
+                Suspend
+              </Button>
+            </>
           )}
       </div>
     </div>
@@ -251,6 +340,22 @@ export function AcpConversation({
               onOpenFile={onOpenFile}
             />
           )}
+          {idle &&
+            !snapshot?.turnCancelled &&
+            snapshot?.messages.some(
+              (message) => message.role === "assistant",
+            ) &&
+            onReviewChanges && (
+              <div className="mt-4 rounded border p-3 text-xs">
+                <p className="mb-2 text-muted-foreground">
+                  Agent is ready. Review the branch-wide diff and test evidence
+                  before publishing.
+                </p>
+                <Button variant="outline" onClick={onReviewChanges}>
+                  Review changes
+                </Button>
+              </div>
+            )}
 
           {!stopped && snapshot?.status === "auth-required" && (
             <div className="border p-3">
@@ -386,6 +491,62 @@ export function AcpConversation({
       </div>
 
       <form onSubmit={send} className="border-t px-3 py-2">
+        {(snapshot?.timings?.startupMs !== undefined ||
+          snapshot?.timings?.resumeMs !== undefined ||
+          persistence?.durationMs !== undefined) && (
+          <p
+            className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-x-3 text-[10px] text-muted-foreground"
+            aria-label="Measured workspace durations"
+          >
+            {snapshot?.timings?.startupMs !== undefined && (
+              <span>
+                Startup {(snapshot.timings.startupMs / 1000).toFixed(1)}s
+              </span>
+            )}
+            {snapshot?.timings?.resumeMs !== undefined && (
+              <span>
+                Last connect/resume{" "}
+                {(snapshot.timings.resumeMs / 1000).toFixed(1)}s
+              </span>
+            )}
+            {persistence?.durationMs !== undefined && (
+              <span
+                title={
+                  persistence.checkedAt
+                    ? new Date(persistence.checkedAt).toLocaleString()
+                    : undefined
+                }
+              >
+                Last save attempt {(persistence.durationMs / 1000).toFixed(1)}s
+                {persistence.unchanged && persistence.state === "saved"
+                  ? " · unchanged, checkpoint reused"
+                  : ""}
+              </span>
+            )}
+          </p>
+        )}
+        {!stopped &&
+          persistence &&
+          persistence.state !== "saved" &&
+          persistence.state !== "disabled" && (
+            <p
+              role={persistence.state === "error" ? "alert" : "status"}
+              className="mx-auto mb-2 max-w-3xl text-[11px] text-muted-foreground"
+            >
+              {persistence.state === "error"
+                ? "Save failed. Working files remain in this workspace. Retry save before suspending."
+                : savePending
+                  ? "Saving files; the workspace will stay running."
+                  : "Changes are awaiting an idle checkpoint."}{" "}
+              Last checkpoint: <span title={savedAt}>{checkpointAge}</span>.
+              {persistence.failure && persistence.state === "error" && (
+                <span className="block break-words select-text">
+                  Failed at {persistence.failure.stage}. Reference:{" "}
+                  {persistence.failure.reference}
+                </span>
+              )}
+            </p>
+          )}
         {stopped && (
           <div className="mx-auto mb-2 w-full max-w-3xl rounded-md border bg-muted/30 p-3 text-muted-foreground">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -402,7 +563,11 @@ export function AcpConversation({
                 type="button"
                 variant="outline"
                 className="h-7 rounded-md text-xs"
-                disabled={actionPending}
+                disabled={
+                  actionPending ||
+                  snapshot?.workspace === "suspending" ||
+                  snapshot?.workspace === "recovering"
+                }
                 onClick={() => void action({ type: "connect" })}
               >
                 <RotateCcw className="mr-1 size-3" aria-hidden="true" />
@@ -419,8 +584,9 @@ export function AcpConversation({
             )}
             {persistence && persistence.state !== "saved" && (
               <p className="mt-2">
-                This history may be newer than the saved files. Only the last
-                successful workspace checkpoint can be restored.
+                This history may be newer than saved files. Recovery keeps any
+                surviving working files; a replacement runtime may lose work
+                since the last checkpoint ({checkpointAge}).
               </p>
             )}
             {networkError && (

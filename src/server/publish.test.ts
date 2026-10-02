@@ -94,6 +94,7 @@ test("publish creates a complete snapshot and draft PR; retry after uncertain re
     draft: true,
   });
   expect(state.result?.sha).toBe(next);
+  expect(state.result?.revision).toBe(tree);
 });
 
 test("stale review and branch switches cannot invoke GitHub; foreign remote heads cannot be overwritten", async () => {

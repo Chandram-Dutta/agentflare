@@ -7,11 +7,71 @@ import {
   rm,
   symlink,
   readlink,
+  chmod,
+  stat,
+  utimes,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { createWorkspaceArchive } from "./workspace-archive.mjs";
+
+test("fingerprints include ignored files, rollouts, bytes, modes, links and empty directories without creating an archive", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "computer-fingerprint-"));
+  const root = join(temp, "workspace");
+  try {
+    await mkdir(join(root, ".codex/sessions"), { recursive: true });
+    await mkdir(join(root, "repo"));
+    const source = join(root, "repo/ignored.bin");
+    await writeFile(source, "aaaa");
+    await writeFile(join(root, "repo/.gitignore"), "ignored.bin");
+    await writeFile(join(root, ".codex/sessions/rollout.jsonl"), "session-one");
+    await writeFile(join(temp, "credential"), "secret-one");
+    await symlink("../credential", join(root, "link"));
+    const handle = createWorkspaceArchive(root, join(temp, "archive"));
+    const fingerprint = async () => {
+      const response = await handle(
+        new Request("http://test/", { method: "HEAD" }),
+      );
+      expect(response.status).toBe(200);
+      const hash = response.headers.get("X-Workspace-Fingerprint");
+      expect(hash).toMatch(/^[a-f0-9]{64}$/);
+      return hash;
+    };
+    let previous = await fingerprint();
+    expect(await fingerprint()).toBe(previous);
+    expect(
+      await Bun.file(join(temp, "archive/workspace.tar.gz")).exists(),
+    ).toBe(false);
+    // Follow neither credential symlinks nor their external file contents.
+    await writeFile(join(temp, "credential"), "secret-two");
+    expect(await fingerprint()).toBe(previous);
+    const before = await stat(source);
+    for (const mutate of [
+      async () => {
+        await writeFile(source, "bbbb"); // same size, restored mtime: bytes must win
+        await utimes(source, before.atime, before.mtime);
+      },
+      () => chmod(source, 0o755),
+      () =>
+        writeFile(join(root, ".codex/sessions/rollout.jsonl"), "session-two"),
+      async () => {
+        await rm(join(root, "link"));
+        await symlink("../different", join(root, "link"));
+      },
+      () => mkdir(join(root, "empty")),
+      () => rm(join(root, "empty"), { recursive: true }),
+    ]) {
+      await mutate();
+      const next = await fingerprint();
+      expect(next).not.toBe(previous);
+      expect(await fingerprint()).toBe(next);
+      previous = next;
+    }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
 
 test("archive restores exact code, Git state and rollouts without copying external credentials", async () => {
   const temp = await mkdtemp(join(tmpdir(), "computer-archive-"));

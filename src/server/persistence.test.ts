@@ -716,6 +716,59 @@ test("Computer threads keep their runtime identity and isolate account/thread di
   }
 });
 
+test("checkpoint API validates ownership and Computer runtime before dispatch", async () => {
+  const project = await createProject();
+  const legacy = await createThread(project.id);
+  const actions: unknown[] = [];
+  env.Computers = {
+    idFromName: (name: string) => name,
+    get: () => ({
+      userAcp: async (_id: string, action: unknown) => {
+        actions.push(action);
+        return {
+          status: "ready",
+          workspace: "running",
+          messages: [],
+          permissions: [],
+        };
+      },
+    }),
+  } as unknown as NonNullable<Bindings["Computers"]>;
+  env.ComputerAuth = {} as NonNullable<Bindings["ComputerAuth"]>;
+  env.ARTIFACTS = {} as NonNullable<Bindings["ARTIFACTS"]>;
+  try {
+    const thread = await createThread(project.id);
+    const endpoint = `/threads/${thread.id}/runtime/acp`;
+    expect(
+      (await request(endpoint, "POST", { type: "checkpoint" }, "bob")).status,
+    ).toBe(404);
+    expect(
+      (
+        await request(endpoint, "POST", {
+          type: "checkpoint",
+          prompt: "never replay",
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(`/threads/${legacy.id}/runtime/acp`, "POST", {
+          type: "checkpoint",
+        })
+      ).status,
+    ).toBe(409);
+    expect(actions).toEqual([]);
+    const saved = await request(endpoint, "POST", { type: "checkpoint" });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ workspace: "running" });
+    expect(actions).toEqual([{ type: "checkpoint" }]);
+  } finally {
+    delete env.Computers;
+    delete env.ComputerAuth;
+    delete env.ARTIFACTS;
+  }
+});
+
 test("activity only exposes owned shared threads and never calls a startup method", async () => {
   const own = await createThread((await createProject()).id);
   const foreign = await createThread((await createProject("bob")).id, "bob");

@@ -69,7 +69,7 @@ export function RepositoryFileTabs({
               tabIndex={path === state.active ? 0 : -1}
               title={path}
               className="max-w-48 truncate px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-primary"
-              onClick={() => viewer.open({ path })}
+              onClick={() => onOpenFile({ path })}
               onKeyDown={(event) => {
                 const index = state.paths.indexOf(path);
                 const next =
@@ -84,7 +84,7 @@ export function RepositoryFileTabs({
                           : undefined;
                 if (next !== undefined) {
                   event.preventDefault();
-                  viewer.open({ path: state.paths[next] });
+                  onOpenFile({ path: state.paths[next] });
                   const tabs = event.currentTarget
                     .closest('[role="tablist"]')
                     ?.querySelectorAll<HTMLButtonElement>('[role="tab"]');

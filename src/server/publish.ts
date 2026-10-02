@@ -151,7 +151,12 @@ export async function publishSnapshot(
       base: input.baseBranch,
       draft: true,
     })) as { number: number; html_url: string });
-  const result = { sha: head!, url: pr.html_url, number: pr.number };
+  const result = {
+    sha: head!,
+    url: pr.html_url,
+    number: pr.number,
+    revision: snapshot.revision,
+  };
   state.result = result;
   await input.save(state);
   return result;

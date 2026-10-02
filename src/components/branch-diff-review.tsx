@@ -9,6 +9,13 @@ import {
   type ReactNode,
 } from "react";
 import { PatchDiff } from "@pierre/diffs/react";
+import {
+  isReviewed,
+  reviewCommentContext,
+  type ReviewProgress,
+  type ReviewSelection,
+} from "../lib/review";
+import { ReviewTests } from "./review-tests";
 import { toast } from "./ui/toast";
 import {
   ChevronDown,
@@ -30,6 +37,10 @@ export type BranchDiffReviewProps = {
   base: string;
   review: BranchReview;
   themeType: "light" | "dark";
+  state?: ReviewProgress;
+  onStateChange?: (state: ReviewProgress) => void;
+  initialScrollTop?: number;
+  onScrollPositionChange?: (position: number) => void;
   onAddContext?: (context: {
     kind: "file" | "selection" | "diff";
     path: string;
@@ -52,6 +63,14 @@ const statuses: Record<string, string> = {
 
 export function BranchDiffReview(props: BranchDiffReviewProps) {
   const [style, setStyle] = useState<"unified" | "split">("unified");
+  const [localState, setLocalState] = useState<ReviewProgress>({
+    reviewed: {},
+  });
+  const state = props.state ?? localState;
+  const onStateChange = (next: ReviewProgress) => {
+    setLocalState(next);
+    props.onStateChange?.(next);
+  };
   const [refresh, setRefresh] = useState(0);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // A new snapshot unmounts the old queue and its results synchronously. Display
@@ -106,9 +125,12 @@ export function BranchDiffReview(props: BranchDiffReviewProps) {
           <RefreshCw className="size-3.5" aria-hidden="true" />
         </button>
       </div>
+      <ReviewTests base={props.base} review={props.review} />
       <ReviewFiles
         key={`${identity}:${refresh}`}
         {...props}
+        state={state}
+        onStateChange={onStateChange}
         style={style}
         collapsed={collapsed}
         setCollapsed={setCollapsed}
@@ -122,6 +144,10 @@ function ReviewFiles({
   review,
   themeType,
   onAddContext,
+  state = { reviewed: {} },
+  onStateChange,
+  initialScrollTop = 0,
+  onScrollPositionChange,
   style,
   collapsed,
   setCollapsed,
@@ -131,6 +157,8 @@ function ReviewFiles({
   setCollapsed: React.Dispatch<React.SetStateAction<Set<string>>>;
 }) {
   const [results, setResults] = useState<Record<string, DiffResult>>({});
+  const scroll = useRef<HTMLDivElement>(null);
+  const restoredScroll = useRef(false);
   const loader = useRef<ReturnType<typeof loadBranchDiffs> | null>(null);
   const files = useRef(new Map<string, HTMLButtonElement>());
   const id = useId();
@@ -140,18 +168,45 @@ function ReviewFiles({
       review.changes.map((file) => file.path),
       (path, result) =>
         setResults((current) => ({ ...current, [path]: result })),
+      undefined,
+      review.revision,
     );
     loader.current = queue;
     return () => queue.cancel();
     // The parent keys this component by base and the complete review identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  useEffect(() => {
+    const paths = new Set(review.changes.map((file) => file.path));
+    const reviewed = { ...state.reviewed };
+    let changed = false;
+    for (const path of Object.keys(reviewed)) {
+      const result = results[path];
+      if (
+        !paths.has(path) ||
+        (result?.state === "ready" && result.fingerprint !== reviewed[path])
+      ) {
+        delete reviewed[path];
+        changed = true;
+      }
+    }
+    if (changed) onStateChange?.({ reviewed });
+  }, [results, review.changes, state.reviewed, onStateChange]);
   const finished = Object.values(results).filter(
     (result) => result.state === "ready",
   ).length;
   const failures = Object.values(results).filter(
     (result) => result.state === "error",
   ).length;
+  useEffect(() => {
+    if (restoredScroll.current || finished + failures !== review.changes.length)
+      return;
+    const frame = requestAnimationFrame(() => {
+      if (scroll.current) scroll.current.scrollTop = initialScrollTop;
+      restoredScroll.current = true;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [finished, failures, review.changes.length, initialScrollTop]);
   const toggle = (path: string) =>
     setCollapsed((current) => {
       const next = new Set(current);
@@ -165,6 +220,17 @@ function ReviewFiles({
         <span role="status" className="text-muted-foreground">
           {finished}/{review.changes.length} loaded
           {failures ? ` · ${failures} failed` : ""}
+          {" · "}
+          {
+            review.changes.filter((file) => {
+              const result = results[file.path];
+              return (
+                result?.state === "ready" &&
+                isReviewed(state, file.path, result.fingerprint)
+              );
+            }).length
+          }
+          /{review.changes.length} reviewed
         </span>
         {review.changes.length > 0 && (
           <>
@@ -211,7 +277,15 @@ function ReviewFiles({
           </>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-auto" aria-label="Changed files">
+      <div
+        ref={scroll}
+        className="min-h-0 flex-1 overflow-auto"
+        aria-label="Changed files"
+        onScroll={(event) => {
+          if (restoredScroll.current)
+            onScrollPositionChange?.(event.currentTarget.scrollTop);
+        }}
+      >
         {!review.changes.length && (
           <p className="p-6 text-muted-foreground">
             No changes in this branch review.
@@ -259,6 +333,27 @@ function ReviewFiles({
                     {statuses[file.status[0]] ?? file.status}
                   </span>
                 </button>
+                <label className="flex shrink-0 items-center gap-1">
+                  <input
+                    type="checkbox"
+                    aria-label={`Mark ${file.path} reviewed`}
+                    disabled={result?.state !== "ready" || !result.fingerprint}
+                    checked={
+                      result?.state === "ready" &&
+                      isReviewed(state, file.path, result.fingerprint)
+                    }
+                    onChange={(event) => {
+                      if (result?.state !== "ready" || !result.fingerprint)
+                        return;
+                      const reviewed = { ...state.reviewed };
+                      if (event.target.checked)
+                        reviewed[file.path] = result.fingerprint;
+                      else delete reviewed[file.path];
+                      onStateChange?.({ reviewed });
+                    }}
+                  />
+                  Reviewed
+                </label>
                 {onAddContext && (
                   <button
                     type="button"
@@ -330,6 +425,9 @@ function ReviewFiles({
                       patch={result.patch}
                       style={style}
                       themeType={themeType}
+                      path={file.path}
+                      revision={review.revision}
+                      onAddContext={onAddContext}
                     />
                   ))}
               </div>
@@ -345,11 +443,20 @@ function DiffBody({
   patch,
   style,
   themeType,
+  path,
+  revision,
+  onAddContext,
 }: {
   patch: string;
   style: "unified" | "split";
   themeType: "light" | "dark";
+  path: string;
+  revision: string;
+  onAddContext: BranchDiffReviewProps["onAddContext"];
 }) {
+  const [selection, setSelection] = useState<ReviewSelection | null>(null);
+  const [comment, setComment] = useState("");
+  const [error, setError] = useState("");
   const kind = patchKind(patch);
   if (kind === "empty")
     return (
@@ -375,6 +482,12 @@ function DiffBody({
     );
   return (
     <DiffFallback key={patch} patch={patch}>
+      {onAddContext && (
+        <p className="px-3 py-2 text-muted-foreground">
+          Select line numbers to request changes. Comments are attached to the
+          agent composer for you to send.
+        </p>
+      )}
       <PatchDiff
         patch={patch}
         options={{
@@ -382,8 +495,64 @@ function DiffBody({
           themeType,
           disableFileHeader: true,
           overflow: "scroll",
+          enableLineSelection: !!onAddContext,
+          onLineSelected: setSelection,
         }}
       />
+      {selection && onAddContext && (
+        <div className="space-y-2 border-t p-3">
+          <label className="block">
+            Request changes · {selection.side === "deletions" ? "old" : "new"}{" "}
+            lines {selection.start}–{selection.end}
+            <textarea
+              className="mt-2 block min-h-20 w-full rounded border bg-background p-2"
+              aria-label={`Review comment for ${path}`}
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+              placeholder="What should the agent change?"
+            />
+          </label>
+          {error && (
+            <p role="alert" className="text-destructive">
+              {error}
+            </p>
+          )}
+          <button
+            type="button"
+            className={`${control} border`}
+            disabled={!comment.trim()}
+            onClick={() => {
+              try {
+                onAddContext(
+                  reviewCommentContext({
+                    path,
+                    revision,
+                    patch,
+                    selection,
+                    comment,
+                  }),
+                );
+                setComment("");
+                setSelection(null);
+                setError("");
+                toast.add({
+                  title: "Review request added to chat",
+                  description:
+                    "Send the prepared context to ask the agent for changes.",
+                });
+              } catch (error) {
+                setError(
+                  error instanceof Error
+                    ? error.message
+                    : "Could not add review request.",
+                );
+              }
+            }}
+          >
+            Add request to agent
+          </button>
+        </div>
+      )}
     </DiffFallback>
   );
 }

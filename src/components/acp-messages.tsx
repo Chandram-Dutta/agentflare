@@ -93,12 +93,17 @@ export function AcpMessages({
     <div className="space-y-5">
       {messages.map((message) => {
         if (message.role === "tool")
-          return <ToolMessage key={message.id} message={message} />;
+          return (
+            <div key={message.id} id={`message-${message.id}`}>
+              <ToolMessage message={message} />
+            </div>
+          );
 
         if (message.role === "thought")
           return (
             <details
               key={message.id}
+              id={`message-${message.id}`}
               className="group min-w-0 pl-3 text-muted-foreground"
             >
               <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
@@ -130,6 +135,7 @@ export function AcpMessages({
         return (
           <article
             key={message.id}
+            id={`message-${message.id}`}
             className={
               message.role === "user"
                 ? "border-l-2 border-primary bg-background/40 px-3 py-2"

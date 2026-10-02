@@ -85,6 +85,7 @@ type Checkpoint = {
   revision: number;
   prefix: string;
   artifact?: string;
+  fingerprint?: string;
 };
 const emptyConversation: AcpSnapshot = {
   status: "disconnected",
@@ -281,42 +282,50 @@ export class ComputerThread extends withWorkspaceContainer(
           throw Error("Thread ownership mismatch.");
         return previous;
       }
-      await this.ctx.storage.put("lifecycle", "starting");
-      const root = `/workspace/threads/${id}`;
-      // A failed clone is disposable until the durable state record is committed.
-      await this.exec(
-        `mkdir -p ${q(root)} && rm -rf ${q(root + "/repo")} && git -c credential.helper= -c http.extraHeader="Authorization: Basic $CLONE_AUTH" clone -- ${q(input.repository)} ${q(root + "/repo")} && git -C ${q(root + "/repo")} switch -c ${q(input.branch)} && git -C ${q(root + "/repo")} config user.name ${q(input.name)} && git -C ${q(root + "/repo")} config user.email agent@agentflare.invalid`,
-        {
-          CLONE_AUTH: Buffer.from(
-            `x-access-token:${input.cloneToken}`,
-          ).toString("base64"),
-          GIT_TERMINAL_PROMPT: "0",
-        },
-      );
-      const refs = (
+      const startedAt = performance.now();
+      try {
+        await this.ctx.storage.put("lifecycle", "starting");
+        const root = `/workspace/threads/${id}`;
+        // A failed clone is disposable until the durable state record is committed.
         await this.exec(
-          `git -C ${q(root + "/repo")} symbolic-ref --short refs/remotes/origin/HEAD && git -C ${q(root + "/repo")} rev-parse HEAD`,
+          `mkdir -p ${q(root)} && rm -rf ${q(root + "/repo")} && git -c credential.helper= -c http.extraHeader="Authorization: Basic $CLONE_AUTH" clone -- ${q(input.repository)} ${q(root + "/repo")} && git -C ${q(root + "/repo")} switch -c ${q(input.branch)} && git -C ${q(root + "/repo")} config user.name ${q(input.name)} && git -C ${q(root + "/repo")} config user.email agent@agentflare.invalid`,
+          {
+            CLONE_AUTH: Buffer.from(
+              `x-access-token:${input.cloneToken}`,
+            ).toString("base64"),
+            GIT_TERMINAL_PROMPT: "0",
+          },
+        );
+        const refs = (
+          await this.exec(
+            `git -C ${q(root + "/repo")} symbolic-ref --short refs/remotes/origin/HEAD && git -C ${q(root + "/repo")} rev-parse HEAD`,
+          )
         )
-      )
-        .trim()
-        .split("\n");
-      if (!refs[0]?.startsWith("origin/") || !/^[a-f0-9]{40}$/.test(refs[1]))
-        throw Error("Cannot determine repository base.");
-      const state: State = {
-        id,
-        owner: input.owner,
-        started: true,
-        agent: "codex",
-        repository: input.repository,
-        baseBranch: refs[0].slice(7),
-        baseSha: refs[1],
-      };
-      await this.ctx.storage.put("state", state);
-      await this.ctx.storage.put("lifecycle", "running");
-      await this.dirty();
-      await this.ctx.storage.put("last-active", Date.now());
-      await this.ctx.storage.setAlarm(Date.now() + 30_000);
-      return state;
+          .trim()
+          .split("\n");
+        if (!refs[0]?.startsWith("origin/") || !/^[a-f0-9]{40}$/.test(refs[1]))
+          throw Error("Cannot determine repository base.");
+        const state: State = {
+          id,
+          owner: input.owner,
+          started: true,
+          agent: "codex",
+          repository: input.repository,
+          baseBranch: refs[0].slice(7),
+          baseSha: refs[1],
+        };
+        await this.ctx.storage.put("state", state);
+        await this.ctx.storage.put("lifecycle", "running");
+        await this.dirty();
+        await this.ctx.storage.put("last-active", Date.now());
+        await this.ctx.storage.setAlarm(Date.now() + 30_000);
+        return state;
+      } finally {
+        await this.ctx.storage.put(
+          "startup-ms",
+          Math.round(performance.now() - startedAt),
+        );
+      }
     });
   }
   private async inspect(
@@ -324,11 +333,18 @@ export class ComputerThread extends withWorkspaceContainer(
     operation: string,
     path = "",
     staged = false,
+    revision?: string,
   ) {
     const state = await this.state(id);
     await this.requireRunning();
     const encoded = Buffer.from(
-      JSON.stringify({ operation, path, staged, base: state.baseSha }),
+      JSON.stringify({
+        operation,
+        path,
+        staged,
+        base: state.baseSha,
+        revision,
+      }),
     ).toString("base64");
     return JSON.parse(
       await this.exec(
@@ -341,8 +357,11 @@ export class ComputerThread extends withWorkspaceContainer(
     operation: string,
     path = "",
     staged = false,
+    revision?: string,
   ): Promise<unknown> {
-    return this.serial(() => this.inspect(id, operation, path, staged));
+    return this.serial(() =>
+      this.inspect(id, operation, path, staged, revision),
+    );
   }
   userReview(id: string): Promise<BranchReview> {
     return this.serial(async () => ({
@@ -453,6 +472,7 @@ export class ComputerThread extends withWorkspaceContainer(
     if (action.type === "connect") {
       if (this.resuming) return this.resuming;
       this.resuming = this.serial(async () => {
+        const startedAt = performance.now();
         const state = await this.state(id);
         const previous =
           await this.ctx.storage.get<WorkspaceLifecycle>("lifecycle");
@@ -461,6 +481,11 @@ export class ComputerThread extends withWorkspaceContainer(
           previous === "suspended";
         await this.ctx.storage.put("lifecycle", "recovering");
         try {
+          // A failed suspend can leave newer files on a live disk than SQLite.
+          // Pull before ensureBridge's exec pushes the synced filesystem back.
+          // If that pull fails, keep the disk untouched and recovery retryable.
+          if (previous === "failed" && this.ctx.container?.running && !restore)
+            await this.pull();
           await this.ensureBridge(state);
           if (restore) {
             const checkpoint =
@@ -497,6 +522,11 @@ export class ComputerThread extends withWorkspaceContainer(
         } catch (error) {
           await this.ctx.storage.put("lifecycle", "failed");
           throw error;
+        } finally {
+          await this.ctx.storage.put(
+            "resume-ms",
+            Math.round(performance.now() - startedAt),
+          );
         }
       }).finally(() => {
         this.resuming = undefined;
@@ -505,6 +535,12 @@ export class ComputerThread extends withWorkspaceContainer(
     }
     return this.serial(async () => {
       await this.state(id);
+      if (action.type === "checkpoint") {
+        await this.checkpoint(id, false);
+        await this.ctx.storage.put("last-active", Date.now());
+        await this.ctx.storage.setAlarm(Date.now() + 30_000);
+        return this.readSnapshot(id);
+      }
       if (action.type === "suspend") {
         if ((await this.lifecycle()) !== "suspended")
           await this.checkpoint(id, true);
@@ -559,6 +595,10 @@ export class ComputerThread extends withWorkspaceContainer(
       saved: workspace === "suspended" && persistence.state === "saved",
       interrupted: workspace === "failed",
       persistence,
+      timings: {
+        startupMs: await this.ctx.storage.get<number>("startup-ms"),
+        resumeMs: await this.ctx.storage.get<number>("resume-ms"),
+      },
     };
   }
   async userSaved(id: string): Promise<AcpSnapshot | null> {
@@ -570,12 +610,21 @@ export class ComputerThread extends withWorkspaceContainer(
   > {
     const checkpoint = await this.ctx.storage.get<Checkpoint>("checkpoint");
     const revision = (await this.ctx.storage.get<number>("revision")) ?? 0;
+    const failure =
+      await this.ctx.storage.get<
+        NonNullable<AcpSnapshot["persistence"]>["failure"]
+      >("checkpoint-error");
+    const timing = await this.ctx.storage.get<{
+      durationMs: number;
+      completedAt: string;
+      unchanged: boolean;
+    }>("save-timing");
     return {
       state: !this.env.BACKUP_BUCKET
         ? "disabled"
         : this.saving
           ? "saving"
-          : (await this.ctx.storage.get("checkpoint-error"))
+          : failure
             ? "error"
             : checkpoint &&
                 checkpoint.revision === revision &&
@@ -584,6 +633,10 @@ export class ComputerThread extends withWorkspaceContainer(
               : "dirty",
       savedAt: checkpoint?.savedAt,
       checkpointId: checkpoint?.id,
+      failure,
+      durationMs: timing?.durationMs,
+      checkedAt: timing?.completedAt,
+      unchanged: timing?.unchanged,
     };
   }
   async userActivity(): Promise<Record<string, AcpActivity>> {
@@ -656,12 +709,14 @@ export class ComputerThread extends withWorkspaceContainer(
     const snapshot = await this.fetchSnapshot(id);
     if (busy(snapshot))
       throw Error(
-        "Agent is busy. Wait for the current operation before suspending.",
+        "Agent is busy. Wait for the current operation before saving or suspending.",
       );
     this.saving = true;
+    const startedAt = performance.now();
     const prefix = `${this.prefix()}checkpoints/${crypto.randomUUID()}`;
     let committed = false;
     let quiesced = false;
+    let unchanged = false;
     let stage = "quiesce";
     try {
       if (suspend) {
@@ -672,49 +727,66 @@ export class ComputerThread extends withWorkspaceContainer(
         if (stopped.status === 409) quiesced = false;
         if (stopped.status !== 204)
           throw Error(
-            "Agent is busy. Wait for the current operation before suspending.",
+            "Agent is busy. Wait for the current operation before saving or suspending.",
           );
       }
       stage = "save-conversation";
       await this.remember(snapshot);
       stage = "filesystem-sync";
       await this.pull();
-      stage = "create-archive";
-      const response = await this.bridge("/workspace-archive");
-      if (!response.ok || !response.body)
-        throw Error("Workspace archive failed.");
-      stage = "upload-archive";
-      await this.uploadArchive(response, `${prefix}/workspace.tar.gz`);
-      stage = "save-checkpoint-conversation";
-      await this.env.BACKUP_BUCKET.put(
-        `${prefix}/conversation.json`,
-        JSON.stringify({ ...snapshot, permissions: [], login: undefined }),
-      );
-      stage = "artifacts";
-      const artifact = await this.checkpointArtifact();
-      const checkpoint: Checkpoint = {
-        id: prefix.split("/").at(-1)!,
-        prefix,
-        savedAt: new Date().toISOString(),
-        revision: (await this.ctx.storage.get<number>("revision")) ?? 0,
-        artifact,
-      };
+      stage = "fingerprint";
       const previous = await this.ctx.storage.get<Checkpoint>("checkpoint");
-      const obsolete = await this.ctx.storage.get<Checkpoint>(
-        "previous-checkpoint",
-      );
-      stage = "commit-checkpoint";
-      await this.ctx.storage.put({
-        checkpoint,
-        ...(previous ? { "previous-checkpoint": previous } : {}),
-      });
+      const revision = (await this.ctx.storage.get<number>("revision")) ?? 0;
+      unchanged =
+        previous?.fingerprint === (await this.fingerprint()) &&
+        previous.revision === revision;
+      if (!unchanged) {
+        // Artifact creation writes Git objects. Include those in the archive and
+        // its fingerprint, otherwise every next idle check would look changed.
+        stage = "artifacts";
+        const artifact = await this.checkpointArtifact();
+        stage = "fingerprint";
+        const fingerprint = await this.fingerprint();
+        stage = "create-archive";
+        const response = await this.bridge("/workspace-archive");
+        if (!response.ok || !response.body)
+          throw Error("Workspace archive failed.");
+        stage = "upload-archive";
+        await this.uploadArchive(response, `${prefix}/workspace.tar.gz`);
+        stage = "verify-files";
+        if (fingerprint !== (await this.fingerprint()))
+          throw Error(
+            "Workspace changed while saving. Retry when writers are idle.",
+          );
+        stage = "save-checkpoint-conversation";
+        await this.env.BACKUP_BUCKET.put(
+          `${prefix}/conversation.json`,
+          JSON.stringify({ ...snapshot, permissions: [], login: undefined }),
+        );
+        const checkpoint: Checkpoint = {
+          id: prefix.split("/").at(-1)!,
+          prefix,
+          savedAt: new Date().toISOString(),
+          revision,
+          artifact,
+          fingerprint,
+        };
+        const obsolete = await this.ctx.storage.get<Checkpoint>(
+          "previous-checkpoint",
+        );
+        stage = "commit-checkpoint";
+        await this.ctx.storage.put({
+          checkpoint,
+          ...(previous ? { "previous-checkpoint": previous } : {}),
+        });
+        if (obsolete)
+          await this.env.BACKUP_BUCKET.delete([
+            `${obsolete.prefix}/workspace.tar.gz`,
+            `${obsolete.prefix}/conversation.json`,
+          ]).catch(() => {});
+      }
       committed = true;
       await this.ctx.storage.delete("checkpoint-error");
-      if (obsolete)
-        await this.env.BACKUP_BUCKET.delete([
-          `${obsolete.prefix}/workspace.tar.gz`,
-          `${obsolete.prefix}/conversation.json`,
-        ]).catch(() => {});
       if (suspend) {
         stage = "stop-container";
         await this.computer.close();
@@ -733,12 +805,24 @@ export class ComputerThread extends withWorkspaceContainer(
       throw error;
     } finally {
       this.saving = false;
+      await this.ctx.storage.put("save-timing", {
+        durationMs: Math.round(performance.now() - startedAt),
+        completedAt: new Date().toISOString(),
+        unchanged,
+      });
       if (!committed)
         await this.env.BACKUP_BUCKET.delete([
           `${prefix}/workspace.tar.gz`,
           `${prefix}/conversation.json`,
         ]).catch(() => {});
     }
+  }
+  private async fingerprint() {
+    const response = await this.bridge("/workspace-archive", "HEAD");
+    const fingerprint = response.headers.get("X-Workspace-Fingerprint");
+    if (!response.ok || !fingerprint || !/^[a-f0-9]{64}$/.test(fingerprint))
+      throw Error("Workspace fingerprint is unavailable.");
+    return fingerprint;
   }
   private async checkpointArtifact() {
     if (!this.env.ARTIFACTS) return;

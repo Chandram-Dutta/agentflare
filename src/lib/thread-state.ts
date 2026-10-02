@@ -2,6 +2,12 @@ import type { AcpAction, AcpActivity, AcpSnapshot, AcpContent } from "./acp";
 import type { RuntimeState, BranchReview, GitChange } from "./runtime";
 import { apiRequest } from "./api-client";
 import {
+  acpReadPath,
+  readAcpUpdate,
+  type AcpReadCursor,
+  type AcpReadUpdate,
+} from "./acp-transport";
+import {
   notificationKind,
   type ThreadNotification,
 } from "./thread-notifications";
@@ -32,6 +38,7 @@ export type ThreadState = {
   attachments?: AcpContent[];
   scroll?: number;
   pending: boolean;
+  pendingAction?: AcpAction["type"] | "start";
   error: string;
   activity?: AcpActivity;
   unread: boolean;
@@ -58,6 +65,9 @@ export class ThreadStateStore {
   private activityVersions = new Map<string, number>();
   private deleted = new Set<string>();
   private loads = new Map<string, Promise<void>>();
+  private conversationRequests = new Map<string, number>();
+  private cursors = new Map<string, AcpReadCursor>();
+  private activityRequest = 0;
   private epoch = 0;
   private revision = 0;
   active?: string;
@@ -105,6 +115,7 @@ export class ThreadStateStore {
     this.entries.delete(id);
     this.finishedTurns.delete(id);
     this.loads.delete(id);
+    this.cursors.delete(id);
     this.epoch++;
     this.emit();
   }
@@ -153,12 +164,13 @@ export class ThreadStateStore {
       return;
     }
     const previous = this.get(id);
+    const alreadyFinished = this.finishedTurns.get(id) === activity.turn;
     let kind = notificationKind(previous.activity, activity);
-    if (kind === "finished" && this.finishedTurns.get(id) === activity.turn)
-      kind = undefined;
+    if (kind === "finished" && alreadyFinished) kind = undefined;
     if (activity.status === "ready" && activity.turn)
       this.finishedTurns.set(id, activity.turn);
     const finished =
+      !alreadyFinished &&
       activity.status === "ready" &&
       !activity.turnCancelled &&
       Boolean(activity.turn) &&
@@ -167,6 +179,7 @@ export class ThreadStateStore {
     this.update(id, {
       activity:
         previous.activity?.status === activity.status &&
+        previous.activity?.workspace === activity.workspace &&
         previous.activity?.turn === activity.turn &&
         previous.activity?.attention === activity.attention &&
         previous.activity?.turnCancelled === activity.turnCancelled &&
@@ -181,7 +194,7 @@ export class ThreadStateStore {
   }
   async ensure(id: string) {
     if (this.loads.has(id)) return this.loads.get(id);
-    if (this.get(id).hydrated) return;
+    if (this.get(id).hydrated) return this.pollConversation(id);
     const version = this.versions.get(id) ?? 0;
     const load = (async () => {
       try {
@@ -229,7 +242,7 @@ export class ThreadStateStore {
     if (this.get(id).pending) return;
     const version = (this.versions.get(id) ?? 0) + 1;
     this.versions.set(id, version);
-    this.update(id, { pending: true, error: "" });
+    this.update(id, { pending: true, pendingAction: "start", error: "" });
     try {
       const runtime = await this.request<RuntimeState>(
         `/threads/${id}/runtime/start`,
@@ -237,15 +250,20 @@ export class ThreadStateStore {
         {},
       );
       if (this.versions.get(id) !== version) return;
-      this.update(id, { runtime, pending: false });
+      this.update(id, { runtime, pending: false, pendingAction: undefined });
       if (runtime.agent === "codex") await this.action(id, { type: "connect" });
     } catch (error) {
       if (this.versions.get(id) === version)
-        this.update(id, { pending: false, error: (error as Error).message });
+        this.update(id, {
+          pending: false,
+          pendingAction: undefined,
+          error: (error as Error).message,
+        });
     }
   }
   async action(id: string, action: AcpAction) {
     if (this.get(id).pending) return false;
+    this.cursors.delete(id);
     const version = (this.versions.get(id) ?? 0) + 1;
     this.versions.set(id, version);
     this.epoch++;
@@ -254,12 +272,16 @@ export class ThreadStateStore {
     // immediately so conversation and repository polling can begin.
     this.update(id, {
       pending: true,
+      pendingAction: action.type,
       error: "",
-      ...(action.type === "suspend" && previousSnapshot
+      ...((action.type === "suspend" || action.type === "checkpoint") &&
+      previousSnapshot
         ? {
             snapshot: {
               ...previousSnapshot,
-              workspace: "suspending" as const,
+              ...(action.type === "suspend"
+                ? { workspace: "suspending" as const }
+                : {}),
               persistence: {
                 ...previousSnapshot.persistence,
                 state: "saving" as const,
@@ -307,7 +329,10 @@ export class ThreadStateStore {
       return true;
     } catch (error) {
       let recoveredSnapshot = previousSnapshot;
-      if (action.type === "suspend" && previousSnapshot?.workspace) {
+      if (
+        (action.type === "suspend" || action.type === "checkpoint") &&
+        previousSnapshot
+      ) {
         // The server may have quiesced Codex before a later save stage failed.
         // Read the truth without reconnecting or replaying any action.
         recoveredSnapshot = await this.request<AcpSnapshot>(
@@ -320,8 +345,10 @@ export class ThreadStateStore {
       if (this.versions.get(id) === version)
         this.update(id, {
           error: (error as Error).message,
-          ...((action.type === "connect" || action.type === "suspend") &&
-          (previousSnapshot?.saved || previousSnapshot?.workspace)
+          ...((action.type === "connect" ||
+            action.type === "suspend" ||
+            action.type === "checkpoint") &&
+          previousSnapshot
             ? {
                 snapshot: recoveredSnapshot,
                 ...(recoveredSnapshot?.workspace
@@ -344,7 +371,7 @@ export class ThreadStateStore {
     } finally {
       this.epoch++;
       if (this.versions.get(id) === version)
-        this.update(id, { pending: false });
+        this.update(id, { pending: false, pendingAction: undefined });
     }
   }
   async pollConversation(id: string) {
@@ -352,26 +379,42 @@ export class ThreadStateStore {
     if (
       !state.runtime?.started ||
       state.runtime.agent !== "codex" ||
+      (state.activity?.workspace ?? state.snapshot?.workspace) ===
+        "suspended" ||
       (state.snapshot?.saved && state.activity?.workspace !== "running") ||
       state.pending
     )
       return;
     const version = this.versions.get(id) ?? 0;
+    const request = (this.conversationRequests.get(id) ?? 0) + 1;
+    this.conversationRequests.set(id, request);
+    const activityVersion = this.activityVersions.get(id);
+    const current = () =>
+      (this.versions.get(id) ?? 0) === version &&
+      this.activityVersions.get(id) === activityVersion &&
+      this.conversationRequests.get(id) === request;
+    const cursor = this.cursors.get(id);
     try {
-      const snapshot = await this.request<AcpSnapshot>(
-        `/threads/${id}/runtime/acp`,
+      const wire = await this.request<AcpReadUpdate>(
+        acpReadPath(id, cursor),
         "GET",
         undefined,
         AbortSignal.timeout(15000),
       );
-      if ((this.versions.get(id) ?? 0) === version) this.accept(id, snapshot);
+      if (!current()) return;
+      const next = readAcpUpdate(cursor, wire);
+      this.cursors.set(id, next);
+      this.accept(id, next.snapshot);
     } catch (error) {
-      if ((this.versions.get(id) ?? 0) === version)
+      if (current()) {
+        this.cursors.delete(id);
         this.update(id, { error: (error as Error).message });
+      }
     }
   }
   async pollActivity() {
     const epoch = this.epoch;
+    const request = ++this.activityRequest;
     const versions = new Map(this.activityVersions);
     try {
       const activity = await this.request<Record<string, AcpActivity>>(
@@ -380,7 +423,7 @@ export class ThreadStateStore {
         undefined,
         AbortSignal.timeout(15000),
       );
-      if (epoch !== this.epoch) return;
+      if (epoch !== this.epoch || request !== this.activityRequest) return;
       this.activityError = false;
       for (const [id, value] of Object.entries(activity))
         if (
@@ -399,6 +442,7 @@ export class ThreadStateStore {
           this.update(id, { activity: undefined });
       this.emit();
     } catch {
+      if (epoch !== this.epoch || request !== this.activityRequest) return;
       this.activityError = true;
       this.emit();
     }
@@ -406,21 +450,49 @@ export class ThreadStateStore {
 }
 
 export function activityLabel(state: ThreadState, stale = false) {
-  if (state.pending)
-    return state.snapshot?.workspace === "suspending"
-      ? "suspending"
-      : "connecting";
-  if (stale || state.error) return "unknown";
+  if (state.pending) {
+    if (
+      state.pendingAction === "checkpoint" ||
+      state.pendingAction === "suspend" ||
+      state.snapshot?.persistence?.state === "saving"
+    )
+      return "saving";
+    if (state.pendingAction === "prompt") return "sending";
+    if (state.pendingAction === "cancel") return "stopping";
+    return "connecting";
+  }
+  if (state.error) return "failed";
+  if (stale) return "unknown";
   const workspace = state.activity?.workspace ?? state.snapshot?.workspace;
   if (workspace && workspace !== "running")
-    return workspace === "failed" ? "interrupted" : workspace;
+    return workspace === "failed"
+      ? "failed"
+      : workspace === "suspending"
+        ? "saving"
+        : workspace;
+  if (state.snapshot?.persistence?.state === "saving") return "saving";
+  if (state.snapshot?.persistence?.state === "error") return "failed";
   const activity = state.activity;
-  if (!activity) return "not connected";
+  if (!activity) return state.snapshot?.saved ? "suspended" : "not connected";
+  if (activity.status === "error") return "failed";
   if (
     activity.attention ||
     ["auth-required", "authenticating"].includes(activity.status)
   )
-    return "needs attention";
-  if (activity.status === "ready" && state.unread) return "finished";
+    return "waiting for user";
+  if (activity.status === "running") return "working";
+  if (activity.status === "ready" && activity.turn && !activity.turnCancelled)
+    return "finished";
   return activity.status;
+}
+
+// Completion acknowledgment is separate from lifecycle: opening a result removes
+// it from the inbox without making the completed thread look idle again.
+export function attentionKind(
+  state: ThreadState,
+): "approval" | "failure" | "finished" | undefined {
+  const label = activityLabel(state);
+  if (label === "failed") return "failure";
+  if (label === "waiting for user") return "approval";
+  if (state.unread) return "finished";
 }

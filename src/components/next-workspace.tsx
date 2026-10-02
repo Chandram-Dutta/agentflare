@@ -2,6 +2,7 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -59,6 +60,10 @@ import {
   appendRepositoryContext,
 } from "@/lib/repository-context";
 import { BranchDiffReview } from "./branch-diff-review";
+import { WorkspaceNavigation } from "./workspace-navigation";
+import { WorkspacePersistence } from "@/lib/workspace-persistence";
+import { ThreadAttentionInbox, ThreadNotifications } from "./thread-attention";
+import { NotificationSettings } from "./notification-settings";
 
 type ReviewContext = Parameters<typeof createRepositoryContext>[0];
 
@@ -103,7 +108,7 @@ export function NextWorkspace({
   children: ReactNode;
 }) {
   return (
-    <ThreadStateProvider>
+    <ThreadStateProvider key={user.id}>
       <WorkspaceShell user={user}>{children}</WorkspaceShell>
     </ThreadStateProvider>
   );
@@ -127,9 +132,14 @@ function WorkspaceShell({
   const [operation, setOperation] = useState<
     "creating" | "deleting" | "signing-out"
   >();
-  const [sidebar, setSidebar] = useState(true);
-  const [agent, setAgent] = useState(true);
+  const [panes, setPanes] = useState<{
+    id?: string;
+    sidebar: boolean;
+    agent: boolean;
+  }>({ sidebar: true, agent: true });
   const [deleting, setDeleting] = useState<Thread>();
+  const [recoveryInfo, setRecoveryInfo] = useState(false);
+  const [reviewToOpen, setReviewToOpen] = useState<string>();
   const [fileToOpen, setFileToOpen] = useState<{
     threadId: string;
     file: RepositoryFileLink;
@@ -142,35 +152,127 @@ function WorkspaceShell({
   const [mobilePane, setMobilePane] = useState<"changes" | "review" | "agent">(
     "review",
   );
-  const showSidebar = narrow ? mobilePane === "changes" : sidebar;
-  const showAgent = narrow ? mobilePane === "agent" : agent;
   const project = data?.projects.find((item) => item.id === route?.projectId);
   const change = data?.threads.find(
     (item) => item.id === route?.changeId && item.projectId === project?.id,
   );
   const changes =
     data?.threads.filter((item) => item.projectId === project?.id) ?? [];
+  const openAttention = useCallback(
+    (thread: Thread) => {
+      router.push(workspaceHref(thread.projectId, thread.id));
+      setMobilePane("agent");
+    },
+    [router],
+  );
+  const [persistence, setPersistence] = useState<WorkspacePersistence>();
+  const [storageWarning, setStorageWarning] = useState("");
+  const savedPanes = change ? persistence?.read(change.id) : undefined;
+  const sidebar =
+    panes.id === change?.id ? panes.sidebar : (savedPanes?.sidebar ?? true);
+  const agent =
+    panes.id === change?.id ? panes.agent : (savedPanes?.agent ?? true);
+  const showSidebar = narrow ? mobilePane === "changes" : sidebar;
+  const showAgent = narrow ? mobilePane === "agent" : agent;
+  function setSidebar(value: boolean) {
+    setPanes({ id: change?.id, sidebar: value, agent });
+    if (change) persistence?.patch(change.id, { sidebar: value });
+  }
+  function setAgent(value: boolean) {
+    setPanes({ id: change?.id, sidebar, agent: value });
+    if (change) persistence?.patch(change.id, { agent: value });
+  }
+  useEffect(() => {
+    if (!data) return;
+    return persistence?.connect(
+      store,
+      data.threads.map((thread) => thread.id),
+    );
+  }, [persistence, data, store]);
+
+  function openFile(file: RepositoryFileLink) {
+    if (!change) return;
+    setFileToOpen({ threadId: change.id, file });
+    setMobilePane("review");
+    const query = new URLSearchParams({ file: file.path });
+    if (file.startLine) query.set("line", String(file.startLine));
+    startNavigation(() =>
+      router.push(
+        `${workspaceHref(change.projectId, change.id, "code")}?${query}`,
+      ),
+    );
+  }
+  useEffect(() => {
+    const restore = () => {
+      const params = new URLSearchParams(window.location.search);
+      const path = params.get("file");
+      if (change && path) {
+        const line = Number(params.get("line"));
+        setFileToOpen({
+          threadId: change.id,
+          file: { path, startLine: line > 0 ? line : undefined },
+        });
+        setMobilePane("review");
+      }
+    };
+    restore();
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, [change, pathname]);
 
   useEffect(() => {
-    store.select(change?.id);
+    store.select(change?.id, !document.hidden);
     if (change) void store.ensure(change.id);
     return () => store.select(undefined);
   }, [store, change]);
 
   useEffect(() => {
     const controller = new AbortController();
+    let saved: WorkspacePersistence | undefined;
+    const changed = (event: StorageEvent) => {
+      if (event.key === "agentflare:account" && event.newValue !== user.id) {
+        saved?.clear();
+        window.location.reload();
+      }
+    };
     void apiRequest<WorkspaceData>(
       "/workspace",
       "GET",
       undefined,
       controller.signal,
     )
-      .then(setData)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        try {
+          saved = new WorkspacePersistence(
+            localStorage,
+            sessionStorage,
+            user.id,
+            setStorageWarning,
+          );
+          localStorage.setItem("agentflare:account", user.id);
+          // Hydrate the existing store before any repository/composer view mounts.
+          saved.connect(
+            store,
+            result.threads.map((thread) => thread.id),
+          )();
+          setPersistence(saved);
+        } catch {
+          setStorageWarning(
+            "Browser storage is unavailable. Drafts and layout will not survive reload.",
+          );
+        }
+        setData(result);
+      })
       .catch((cause) => {
         if (!controller.signal.aborted) setError(cause.message);
       });
-    return () => controller.abort();
-  }, []);
+    window.addEventListener("storage", changed);
+    return () => {
+      controller.abort();
+      window.removeEventListener("storage", changed);
+    };
+  }, [store, user.id]);
 
   useEffect(() => {
     const title =
@@ -244,6 +346,7 @@ function WorkspaceShell({
     try {
       await apiRequest(`/threads/${deleting.id}`, "DELETE");
       store.forget(deleting.id);
+      persistence?.forget(deleting.id);
       setData(
         (current) =>
           current && {
@@ -269,6 +372,12 @@ function WorkspaceShell({
     setError("");
     try {
       await apiRequest("/auth/sign-out", "POST", {});
+      persistence?.clear();
+      try {
+        localStorage.removeItem("agentflare:account");
+      } catch {
+        /* Storage may be disabled. */
+      }
       window.location.reload();
     } catch (cause) {
       toast.add({
@@ -283,6 +392,13 @@ function WorkspaceShell({
 
   return (
     <div className="workspace-shell work-tabs flex h-dvh min-h-0 flex-col overflow-hidden">
+      {data && (
+        <ThreadNotifications
+          projects={data.projects}
+          threads={data.threads}
+          onSelect={openAttention}
+        />
+      )}
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3 text-xs">
         <Link href="/workspace" className="shrink-0 font-medium">
           agentflare<span className="text-primary">_</span>
@@ -315,6 +431,21 @@ function WorkspaceShell({
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1">
+          <WorkspaceNavigation
+            key={change?.id ?? "projects"}
+            data={data}
+            thread={change}
+            navigate={(href) => {
+              setMobilePane("review");
+              startNavigation(() => router.push(href));
+            }}
+            openFile={openFile}
+            showConversation={() => {
+              setAgent(true);
+              setMobilePane("agent");
+            }}
+            newThread={() => void createChange()}
+          />
           <Button
             variant="ghost"
             size="icon-sm"
@@ -356,6 +487,7 @@ function WorkspaceShell({
             <Moon className="size-4 dark:hidden" />
             <Sun className="hidden size-4 dark:block" />
           </Button>
+          <NotificationSettings userId={user.id} />
           <Button
             variant="ghost"
             size="icon-sm"
@@ -368,6 +500,11 @@ function WorkspaceShell({
           </Button>
         </div>
       </header>
+      {storageWarning && (
+        <p role="alert" className="border-b px-3 py-2 text-xs text-destructive">
+          {storageWarning}
+        </p>
+      )}
       {error && !deleting && (
         <div
           role="alert"
@@ -391,6 +528,13 @@ function WorkspaceShell({
         </p>
       ) : (
         <Group
+          key={`${change?.id ?? "home"}-${narrow}-${showSidebar}-${showAgent}`}
+          defaultLayout={
+            !narrow && change ? persistence?.read(change.id).layout : undefined
+          }
+          onLayoutChanged={(layout) => {
+            if (!narrow && change) persistence?.patch(change.id, { layout });
+          }}
           orientation="horizontal"
           className="min-h-0 flex-1"
           aria-label="Review workspace"
@@ -417,6 +561,11 @@ function WorkspaceShell({
                       </Button>
                     )}
                   </div>
+                  <ThreadAttentionInbox
+                    projects={data.projects}
+                    threads={data.threads}
+                    onSelect={openAttention}
+                  />
                   <nav
                     className="min-h-0 flex-1 space-y-1 overflow-auto p-2"
                     aria-label={project ? "Project threads" : "Projects"}
@@ -518,7 +667,11 @@ function WorkspaceShell({
                     </p>
                   ) : change && project ? (
                     <ChangeReview
+                      key={change.id}
                       change={change}
+                      persistence={persistence}
+                      openReview={reviewToOpen === change.id}
+                      onReviewOpened={() => setReviewToOpen(undefined)}
                       project={project}
                       narrow={narrow}
                       view={route?.view ?? "overview"}
@@ -613,8 +766,10 @@ function WorkspaceShell({
                 <DeveloperPane
                   key={change.id}
                   change={change}
-                  onOpenFile={(file) => {
-                    setFileToOpen({ threadId: change.id, file });
+                  onOpenFile={openFile}
+                  onReviewChanges={() => {
+                    setFileToOpen(undefined);
+                    setReviewToOpen(change.id);
                     setMobilePane("review");
                     startNavigation(() =>
                       router.push(
@@ -633,8 +788,42 @@ function WorkspaceShell({
         <span className="truncate">
           {change ? `agentflare/${change.id}` : "No thread selected"}
         </span>
-        <span className="ml-auto shrink-0">Development preview</span>
+        <button
+          className="ml-auto shrink-0 underline-offset-2 hover:underline"
+          onClick={() => setRecoveryInfo(true)}
+        >
+          Recovery info
+        </button>
       </footer>
+      <Dialog open={recoveryInfo} onOpenChange={setRecoveryInfo}>
+        <DialogContent>
+          <DialogTitle>Browser recovery</DialogTitle>
+          <DialogDescription>
+            Drafts and attachments are stored unencrypted in this tab’s session
+            storage for reload recovery, for up to seven days. Same-origin
+            scripts can read them, and browser session restoration may retain
+            them after closing a tab. Signing out or changing accounts clears
+            recovery data. Storage failures appear above the workspace.
+          </DialogDescription>
+          <p className="text-xs text-muted-foreground">
+            Pane sizes, file paths, positions and review fingerprints are saved
+            for this account on this installation. Source files and
+            conversations are not copied into durable browser storage.
+          </p>
+          <Button
+            variant="outline"
+            onClick={() => {
+              persistence?.clear();
+              setStorageWarning(
+                "Browser recovery cleared and disabled until reload. Current drafts remain in memory.",
+              );
+              setRecoveryInfo(false);
+            }}
+          >
+            Clear browser recovery
+          </Button>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={Boolean(deleting)}
         onOpenChange={(value) => {
@@ -682,6 +871,9 @@ function ChangeReview({
   fileToOpen,
   onFileOpened,
   onAddContext,
+  persistence,
+  openReview,
+  onReviewOpened,
 }: {
   change: Thread;
   project: Project;
@@ -690,13 +882,26 @@ function ChangeReview({
   fileToOpen?: RepositoryFileLink;
   onFileOpened: () => void;
   onAddContext: (context: ReviewContext) => void;
+  persistence?: WorkspacePersistence;
+  openReview: boolean;
+  onReviewOpened: () => void;
 }) {
   const state = useThreadState(change.id);
+  const [progress, setProgress] = useState(
+    () => persistence?.read(change.id).review ?? { reviewed: {} },
+  );
   const review = state.repository?.review;
   const { resolvedTheme } = useTheme();
-  const inspector = useRef<{ openFile: (file: RepositoryFileLink) => void }>(
-    null,
-  );
+  const inspector = useRef<{
+    openFile: (file: RepositoryFileLink) => void;
+    openReview: () => void;
+  }>(null);
+  useEffect(() => {
+    if (view === "code" && openReview && inspector.current) {
+      inspector.current.openReview();
+      onReviewOpened();
+    }
+  }, [view, openReview, onReviewOpened]);
   useEffect(() => {
     if (view === "code" && fileToOpen && inspector.current) {
       inspector.current.openFile(fileToOpen);
@@ -738,8 +943,28 @@ function ChangeReview({
               stacked={narrow}
               initialTab="changes"
               onAddContext={onAddContext}
+              onNavigateFile={(file) => {
+                const params = new URLSearchParams({ file: file.path });
+                if (file.startLine) params.set("line", String(file.startLine));
+                const href = `${workspaceHref(project.id, change.id, "code")}?${params}`;
+                if (window.location.pathname + window.location.search !== href)
+                  window.history.pushState(window.history.state, "", href);
+              }}
               renderBranchReview={(branch) => (
                 <BranchDiffReview
+                  {...{
+                    state: progress,
+                    initialScrollTop: persistence?.read(change.id)
+                      .reviewScrollTop,
+                    onScrollPositionChange: (reviewScrollTop: number) =>
+                      persistence?.patch(change.id, { reviewScrollTop }),
+                    onStateChange: (value: {
+                      reviewed: Record<string, string>;
+                    }) => {
+                      setProgress(value);
+                      persistence?.patch(change.id, { review: value });
+                    },
+                  }}
                   base={`/threads/${change.id}/runtime`}
                   review={branch}
                   themeType={resolvedTheme === "dark" ? "dark" : "light"}
@@ -826,9 +1051,11 @@ function ChangeReview({
 function DeveloperPane({
   change,
   onOpenFile,
+  onReviewChanges,
 }: {
   change: Thread;
   onOpenFile: (file: RepositoryFileLink) => void;
+  onReviewChanges: () => void;
 }) {
   const store = useThreadStore();
   const state = useThreadState(change.id);
@@ -848,6 +1075,7 @@ function DeveloperPane({
           threadId={change.id}
           headerTarget={controls}
           onOpenFile={onOpenFile}
+          onReviewChanges={onReviewChanges}
         />
       ) : (
         <div className="p-5 text-xs leading-5">

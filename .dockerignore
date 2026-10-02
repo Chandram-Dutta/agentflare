@@ -2,6 +2,7 @@
 !Dockerfile
 !sandbox/
 !sandbox/repository.mjs
+!sandbox/review-tests.mjs
 !sandbox/launch-agent.sh
 !sandbox/acp/
 !sandbox/acp/package.json
@@ -11,5 +12,6 @@
 !sandbox/acp/auth-checkpoint.mjs
 !sandbox/acp/checkpoint-loop.mjs
 !sandbox/acp/workspace-archive.mjs
+!sandbox/acp/snapshot-transport.mjs
 !sandbox/Computer.Dockerfile
 sandbox/acp/node_modules/

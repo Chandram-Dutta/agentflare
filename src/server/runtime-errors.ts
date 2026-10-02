@@ -2,6 +2,7 @@ type Operation =
   | "start"
   | "delete"
   | "connect"
+  | "save"
   | "inspect"
   | "load"
   | "request";
@@ -10,10 +11,24 @@ type Operation =
 // prompts, shell commands, and repository contents; never return or log them.
 const known = new Map<string, [string, string]>([
   [
+    "Workspace fingerprint is unavailable.",
+    [
+      "workspace_fingerprint_unavailable",
+      "Workspace files could not be checked safely. Retry save after stopping background writers. If it repeats, ask the operator to check unsupported file types and the Computer image's fingerprint endpoint; do not delete the thread.",
+    ],
+  ],
+  [
+    "Workspace changed while saving. Retry when writers are idle.",
+    [
+      "workspace_changed_during_save",
+      "Workspace files could not be verified as stable. Stop background writers and retry save. The previous checkpoint is retained; do not delete the thread.",
+    ],
+  ],
+  [
     "Workspace archive length is invalid.",
     [
       "workspace_archive_length",
-      "The backup archive could not be transferred safely. The previous checkpoint is retained. Recover the workspace from the conversation and share this reference with the operator; do not delete the thread.",
+      "The backup archive could not be transferred safely. The previous checkpoint is retained. Retry save if the workspace is running, or recover it if stopped. Share this reference with the operator if it repeats; do not delete the thread.",
     ],
   ],
   [
@@ -24,10 +39,10 @@ const known = new Map<string, [string, string]>([
     ],
   ],
   [
-    "Agent is busy. Wait for the current operation before suspending.",
+    "Agent is busy. Wait for the current operation before saving or suspending.",
     [
       "workspace_busy",
-      "The agent is still working or waiting for approval. Finish or stop that operation before saving and suspending.",
+      "The agent is still working or waiting for approval. Finish or stop that operation before saving or suspending.",
     ],
   ],
   [
@@ -162,6 +177,7 @@ const fallback: Record<Operation, string> = {
     "Thread deletion did not finish. The thread is still listed and cleanup may be partial. Retry deletion; if it remains stuck, share the reference below with the operator.",
   connect:
     "Codex could not be reached. Reconnect to reload the session before retrying. Check whether your last message was accepted before sending it again.",
+  save: "The workspace save did not finish. Retry save if the workspace is running, or recover it if stopped. Do not delete the thread. Share this reference with the operator if it repeats.",
   inspect:
     "The workspace could not be read. Reopen it and refresh the file list. If only one file fails, it may be missing, binary, or too large.",
   load: "Thread state could not be loaded. Refresh and retry. If it still fails, share the reference below with the operator; this error alone does not mean your files were deleted.",

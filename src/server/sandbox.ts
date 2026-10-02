@@ -28,8 +28,9 @@ export class ThreadSandbox extends Sandbox<Bindings> {
     operation: string,
     path = "",
     staged = false,
+    revision?: string,
   ): Promise<unknown> {
-    return this.shared.inspect(id, operation, path, staged);
+    return this.shared.inspect(id, operation, path, staged, revision);
   }
   userReview(id: string) {
     return this.shared.review(id);

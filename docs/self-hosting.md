@@ -215,6 +215,36 @@ prefix. Current and previous successful checkpoints are retained; thread deletio
 removes its objects. Allow space for ignored dependencies and Git/session data,
 not just tracked source. Recovery does not restore running processes.
 
+**Save checkpoint** archives an idle Computer workspace without stopping it.
+**Suspend workspace** first stops the idle agent, commits a checkpoint, and only
+then destroys the container. Both refuse active turns, approvals, and login flows.
+Automatic idle saves and suspension still run on the existing alarm schedule.
+The conversation shows the last successful checkpoint's age separately from a
+pending or failed save. A running workspace offers **Retry save** after failure;
+the previous successful checkpoint and working disk are retained. If suspension
+already stopped the agent, use **Recover workspace** instead. Recovery pulls
+surviving disk changes before restarting the bridge and never replays a prompt.
+If that pull fails, recovery stops without pushing older synced files onto disk.
+Save failure references identify a sanitized stage in Worker logs, not source or
+credentials. These are filesystem checkpoints, not VM or process snapshots;
+background writers outside the managed agent are not frozen by a checkpoint.
+
+Idle checks pull files and hash the actual workspace (including Git metadata,
+ignored files, modes, symlinks and native rollouts). When that fingerprint and
+conversation revision match the committed checkpoint, the archive and Artifacts
+upload are skipped; the original checkpoint age remains visible. A changed
+workspace is fingerprinted before and after archiving, and mismatches retain the
+previous checkpoint. Hashing still reads every file; it is not an atomic snapshot
+or a promise that arbitrary background writers are frozen. Unsupported special
+files fail the check rather than being silently omitted. Older checkpoints get a
+fingerprint on the next successful save. Deploy the matching Computer image with
+its internal archive `HEAD` endpoint before relying on these checks.
+
+The conversation displays measured startup, last connect/resume, and last save
+attempt durations, including failed attempts. Startup measures clone/setup;
+connect/resume measures bridge/session restoration separately. Reused checkpoints
+show the check duration without pretending a new archive was created.
+
 Run the container-replacement check on a Docker host with FUSE support:
 
 ```sh

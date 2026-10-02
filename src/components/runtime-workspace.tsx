@@ -32,6 +32,7 @@ import type { RepositoryFileLink } from "@/lib/repository-links";
 
 type RepositoryInspectorHandle = {
   openFile: (file: RepositoryFileLink) => void;
+  openReview: () => void;
 };
 
 type RepositoryView = NonNullable<RepositoryState["view"]>;
@@ -214,6 +215,7 @@ export function RepositoryInspector({
   navigationFirst = false,
   stacked = false,
   onAddContext,
+  onNavigateFile,
   renderBranchReview,
   ref,
 }: {
@@ -226,6 +228,7 @@ export function RepositoryInspector({
   navigationFirst?: boolean;
   stacked?: boolean;
   onAddContext?: (context: RepositoryContext) => void;
+  onNavigateFile?: (file: RepositoryFileLink) => void;
   renderBranchReview?: (review: BranchReview) => ReactNode;
   ref?: Ref<RepositoryInspectorHandle>;
 }) {
@@ -368,6 +371,7 @@ export function RepositoryInspector({
       path: string,
       staged?: boolean | "branch",
       lines?: RepositoryFileLink,
+      recordHistory = true,
     ) => {
       const request = ++selection.current;
       selected.current = { path, staged };
@@ -377,6 +381,7 @@ export function RepositoryInspector({
       if (staged === undefined) {
         setPending(false);
         fileViewer.open({ path, ...lines });
+        if (recordHistory) onNavigateFile?.({ path, ...lines });
         return;
       }
       setPending(true);
@@ -406,11 +411,23 @@ export function RepositoryInspector({
         if (request === selection.current) setPending(false);
       }
     },
-    [base, fileViewer],
+    [base, fileViewer, onNavigateFile],
   );
   useImperativeHandle(
     ref,
-    () => ({ openFile: (file) => void open(file.path, undefined, file) }),
+    () => ({
+      openFile: (file) => void open(file.path, undefined, file, false),
+      openReview: () => {
+        selection.current++;
+        selected.current = undefined;
+        setView(undefined);
+        setPending(false);
+        setError("");
+        setTab("changes");
+        setBranchReviewOpen(true);
+        setRevision((value) => value + 1);
+      },
+    }),
     [open],
   );
   const viewer = (
@@ -579,7 +596,7 @@ export function RepositoryInspector({
                       setBranchReviewOpen(true);
                     }}
                   >
-                    All changes{" "}
+                    Review changes{" "}
                     <span className="text-muted-foreground">
                       ({review.changes.length})
                     </span>

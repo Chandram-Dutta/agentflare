@@ -1,8 +1,9 @@
 import { apiRequest } from "../lib/api-client";
+import { patchFingerprint } from "../lib/review";
 
 export type DiffResult =
   | { state: "loading" }
-  | { state: "ready"; patch: string }
+  | { state: "ready"; patch: string; fingerprint?: string }
   | { state: "error"; message: string };
 
 export function patchKind(patch: string) {
@@ -22,6 +23,7 @@ export function loadBranchDiffs(
     url,
     signal,
   ) => apiRequest(url, "GET", undefined, signal),
+  revision?: string,
 ) {
   const controller = new AbortController();
   const queue = [...new Set(paths)];
@@ -46,9 +48,24 @@ export function loadBranchDiffs(
             typeof value.patch !== "string"
           )
             throw new Error("The server returned an invalid diff response.");
+          if (
+            revision &&
+            (!("revision" in value) || value.revision !== revision)
+          )
+            throw new Error(
+              "The checkout changed. Refresh the review before continuing.",
+            );
+          const fingerprint =
+            revision && value.patch.trim()
+              ? await patchFingerprint(value.patch)
+              : undefined;
           if (!controller.signal.aborted) {
             states.set(path, "ready");
-            onResult(path, { state: "ready", patch: value.patch });
+            onResult(path, {
+              state: "ready",
+              patch: value.patch,
+              ...(fingerprint ? { fingerprint } : {}),
+            });
           }
         } catch (error) {
           if (!controller.signal.aborted) {

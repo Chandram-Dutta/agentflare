@@ -96,8 +96,8 @@ test("browser delivery requires an inactive tab, secure context, and permission;
     browser.isSecureContext = true;
     expect(created).toHaveLength(0);
     expect(show()).toBeDefined();
-    expect(created[0].title).toBe("Codex finished");
-    expect(created[0].options.body).toContain("project / thread");
+    expect(created[0].title).toBe("project / thread — finished");
+    expect(created[0].options.tag).toBe("agentflare-a-finished");
     created[0].onclick?.();
     expect(created[0].closed).toBe(true);
     expect(focused).toBe(1);
@@ -107,7 +107,7 @@ test("browser delivery requires an inactive tab, secure context, and permission;
       "other thread",
       () => {},
     );
-    expect(created[1].title).toBe("Codex needs your attention");
+    expect(created[1].title).toBe("other thread — waiting for you");
     // Another app can have focus while this browser tab remains visible.
     document.hidden = false;
     hasFocus = false;
