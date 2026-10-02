@@ -5,4 +5,5 @@ COPY sandbox/acp/bridge.mjs /opt/agentflare/acp/bridge.mjs
 COPY sandbox/acp/content.mjs /opt/agentflare/acp/content.mjs
 COPY sandbox/acp/auth-checkpoint.mjs /opt/agentflare/acp/auth-checkpoint.mjs
 COPY sandbox/acp/checkpoint-loop.mjs /opt/agentflare/acp/checkpoint-loop.mjs
+COPY sandbox/acp/snapshot-transport.mjs /opt/agentflare/acp/snapshot-transport.mjs
 COPY sandbox/repository.mjs /opt/agentflare/repository.mjs

@@ -10,6 +10,7 @@ import {
 } from "@cloudflare/computer/backends/container";
 import type { Bindings } from "./env";
 import type { AcpAction, AcpActivity, AcpSnapshot } from "@/lib/acp";
+import { createSnapshotTransport, readSnapshotUpdate, type SnapshotCursor, type SnapshotUpdate } from "../../sandbox/acp/snapshot-transport.mjs";
 import {
   shellArgument as q,
   type RuntimeState,
@@ -116,6 +117,8 @@ export class ComputerThread extends withWorkspaceContainer(
   private operations: Promise<unknown> = Promise.resolve();
   private saving = false;
   private resuming?: Promise<AcpSnapshot>;
+  private readTransport = createSnapshotTransport<AcpSnapshot>();
+  private bridgeCursor?: SnapshotCursor<AcpSnapshot>;
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.operations.then(work, work);
     this.operations = result.catch(() => {});
@@ -522,13 +525,23 @@ export class ComputerThread extends withWorkspaceContainer(
     });
   }
   private async fetchSnapshot(id: string, action?: AcpAction) {
+    // Capture the base per request: concurrent reads may finish out of order.
+    const base = this.bridgeCursor;
     const response = await this.bridge(
-      `/acp/${id}`,
+      `/acp/${id}${action ? "" : `?transport=delta${base ? `&revision=${encodeURIComponent(base.revision)}` : ""}`}`,
       action ? "POST" : "GET",
       action,
     );
     if (!response.ok) throw Error("Codex bridge request failed.");
-    return (await response.json()) as AcpSnapshot;
+    const payload = await response.json() as AcpSnapshot | SnapshotUpdate<AcpSnapshot>;
+    // Legacy images still return a plain snapshot during a rolling upgrade.
+    if ("status" in payload) return payload;
+    const cursor = readSnapshotUpdate(base, payload);
+    if (this.bridgeCursor === base) this.bridgeCursor = cursor;
+    return cursor.snapshot;
+  }
+  async userAcpRead(id: string, revision?: string) {
+    return this.readTransport.read(await this.readSnapshot(id), revision);
   }
   private async readSnapshot(id: string): Promise<AcpSnapshot> {
     await this.state(id);

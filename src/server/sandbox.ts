@@ -1,5 +1,6 @@
 import { Sandbox } from "@cloudflare/sandbox";
-import type { AcpAction, AcpActivity } from "@/lib/acp";
+import type { AcpAction, AcpActivity, AcpSnapshot } from "@/lib/acp";
+import { createSnapshotTransport } from "../../sandbox/acp/snapshot-transport.mjs";
 import type { PublishInput } from "@/lib/runtime";
 import type { Bindings } from "./env";
 import { UserRuntime, type UserStart } from "./user-runtime";
@@ -41,6 +42,29 @@ export class ThreadSandbox extends Sandbox<Bindings> {
   }
   userAcp(id: string, action?: AcpAction) {
     return this.shared.acp(id, action);
+  }
+  private readTransports = new Map<string, ReturnType<typeof createSnapshotTransport<AcpSnapshot>>>();
+  async userAcpRead(id: string, revision?: string) {
+    // Passive reads must not call shared.acp: it connects/wakes the runtime.
+    if (this.ctx.container?.running) {
+      const response = await this.ctx.container.getTcpPort(8766).fetch(
+        `http://container/acp/${encodeURIComponent(id)}?transport=delta${revision ? `&revision=${encodeURIComponent(revision)}` : ""}`,
+      );
+      if (!response.ok) throw Error("Conversation unavailable.");
+      const payload = await response.json() as AcpSnapshot | import("@/lib/acp-transport").AcpReadUpdate;
+      if (!("status" in payload)) return payload;
+      return this.savedReadTransport(id).read(payload, revision);
+    }
+    return this.savedReadTransport(id).read(await this.shared.userSaved(id), revision);
+  }
+  private savedReadTransport(id: string) {
+    let transport = this.readTransports.get(id);
+    if (!transport) {
+      transport = createSnapshotTransport<AcpSnapshot>();
+      this.readTransports.set(id, transport);
+      if (this.readTransports.size > 16) this.readTransports.delete(this.readTransports.keys().next().value!);
+    }
+    return transport;
   }
   userSaved(id: string) {
     return this.shared.userSaved(id);

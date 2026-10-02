@@ -548,8 +548,14 @@ api.on(["GET", "POST"], "/threads/:id/runtime/acp", async (c) => {
       { error: "Explicit suspension is available for Computer threads." },
       409,
     );
-  const sandbox = await runtime(c.env, c.get("user").id, owned, true);
+  const sandbox = await runtime(c.env, c.get("user").id, owned, Boolean(action));
   try {
+    if (!action) {
+      c.header("Cache-Control", "no-store");
+      const incremental = c.req.query("transport") === "delta";
+      const update = await sandbox.userAcpRead(owned.id, incremental ? c.req.query("revision") : undefined);
+      return c.json(!incremental && "snapshot" in update ? update.snapshot : update);
+    }
     return c.json(await sandbox.userAcp(owned.id, action));
   } catch (error) {
     return c.json(runtimeFailure(error, "connect"), 409);

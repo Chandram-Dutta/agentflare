@@ -7,6 +7,7 @@ import { retainContent, appendContent, boundContent, promptContent } from "./con
 import { createAuthCheckpoint } from "./auth-checkpoint.mjs";
 import { createCheckpointLoop } from "./checkpoint-loop.mjs";
 import { createWorkspaceArchive } from "./workspace-archive.mjs";
+import { createSnapshotTransport } from "./snapshot-transport.mjs";
 
 function childExit(child) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -401,6 +402,7 @@ if (import.meta.main) {
       (s) => ["running", "configuring", "connecting", "authenticating"].includes(s.status)),
   });
   const archive = process.env.AGENTFLARE_COMPUTER === "1" ? createWorkspaceArchive() : null;
+  const transports = new WeakMap();
   const server = Bun.serve({
     hostname: "0.0.0.0", // Reachable only through the authenticated Worker/DO.
     port: 8766,
@@ -445,7 +447,14 @@ if (import.meta.main) {
         try { await checkpoint.sync(); authPersistence = "saved"; }
         catch { authPersistence = "pending"; }
       }
-      return Response.json({ ...target.snapshot, authScope: "user", authPersistence }, {
+      const snapshot = { ...target.snapshot, authScope: "user", authPersistence };
+      const url = new URL(request.url);
+      let payload = snapshot;
+      if (request.method === "GET" && url.searchParams.get("transport") === "delta") {
+        if (!transports.has(target)) transports.set(target, createSnapshotTransport());
+        payload = transports.get(target).read(snapshot, url.searchParams.get("revision"));
+      }
+      return Response.json(payload, {
         headers: { "Cache-Control": "no-store" },
       });
     },
