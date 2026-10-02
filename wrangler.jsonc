@@ -44,7 +44,10 @@
         },
         {
           "tag": "v3-native-runtime",
-          "new_sqlite_classes": ["NativeThread"],
+          "new_sqlite_classes": ["NativeThread"]
+        },
+        {
+          "tag": "v4-retire-computer",
           "deleted_classes": ["ComputerThread"]
         }
       ],

@@ -28,6 +28,9 @@ to replace **only** the Next ComputerThread container application. A new namespa
 is required; preserving work instead requires an explicit export/import process.
 For the approved disposable-testing reset, remove old Next thread records and
 delete the old container application before deploying migration `v3-native-runtime`.
+Deploy `v3` with the old class still exported and the `Computers` binding switched
+to `NativeThread`. Only after that succeeds deploy `v4-retire-computer` and remove
+the old export: Cloudflare rejects deletion while the existing binding references it.
 Deploy the matching Worker and named `workspace` image. Do not run this against
 `agentflare-web` or its shared sandbox application.
 
