@@ -27,6 +27,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "./ui/button";
+import { toast } from "./ui/toast";
 import {
   Dialog,
   DialogContent,
@@ -171,6 +172,28 @@ function WorkspaceShell({
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    const title =
+      operation === "creating"
+        ? "Creating and starting thread…"
+        : operation === "deleting"
+          ? "Deleting thread…"
+          : operation === "signing-out"
+            ? "Signing out…"
+            : navigating
+              ? "Opening workspace…"
+              : undefined;
+    if (!title) return;
+    let id: string | undefined;
+    const timer = setTimeout(() => {
+      id = toast.add({ title, type: "loading", timeout: 0 });
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      if (id) toast.close(id);
+    };
+  }, [operation, navigating]);
+
   function saveProject(saved: Project) {
     setData(
       (current) =>
@@ -204,9 +227,12 @@ function WorkspaceShell({
       await store.ensure(saved.id);
       await store.start(saved.id);
     } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : "Could not start thread.",
-      );
+      toast.add({
+        title: "Could not start thread",
+        description: cause instanceof Error ? cause.message : "Try again.",
+        type: "error",
+        timeout: 10000,
+      });
     } finally {
       setOperation(undefined);
     }
@@ -227,6 +253,7 @@ function WorkspaceShell({
       );
       if (change?.id === deleting.id)
         router.replace(workspaceHref(deleting.projectId));
+      toast.add({ title: "Thread deleted", description: deleting.name });
       setDeleting(undefined);
     } catch (cause) {
       setError(
@@ -244,7 +271,12 @@ function WorkspaceShell({
       await apiRequest("/auth/sign-out", "POST", {});
       window.location.reload();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Sign-out failed.");
+      toast.add({
+        title: "Sign-out failed",
+        description: cause instanceof Error ? cause.message : "Try again.",
+        type: "error",
+        timeout: 10000,
+      });
       setOperation(undefined);
     }
   }
@@ -336,21 +368,7 @@ function WorkspaceShell({
           </Button>
         </div>
       </header>
-      {navigating && (
-        <p role="status" className="border-b px-3 py-1 text-xs">
-          Opening workspace…
-        </p>
-      )}
-      {operation && (
-        <p role="status" className="border-b px-3 py-1 text-xs">
-          {operation === "creating"
-            ? "Creating and starting thread…"
-            : operation === "deleting"
-              ? "Deleting thread…"
-              : "Signing out…"}
-        </p>
-      )}
-      {error && (
+      {error && !deleting && (
         <div
           role="alert"
           className="border-b px-4 py-2 text-xs text-destructive"

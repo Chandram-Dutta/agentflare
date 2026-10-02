@@ -11,6 +11,7 @@ import { File } from "@pierre/diffs/react";
 import type { FileOptions } from "@pierre/diffs";
 import { X } from "lucide-react";
 import { ChatMarkdown } from "./chat-markdown";
+import { toast } from "./ui/toast";
 import {
   CONTEXT_LIMIT,
   fileContext,
@@ -151,17 +152,28 @@ function FilePane({
     () => ({ name: file.path, contents: file.content ?? "" }),
     [file.path, file.content],
   );
-  const [contextError, setContextError] = useState("");
   function send(context: RepositoryContext) {
     try {
-      onAddContext?.(context);
-      setContextError("");
+      if (!onAddContext) return;
+      onAddContext(context);
+      toast.add({
+        id: "repository-context",
+        type: "success",
+        timeout: 5000,
+        title:
+          context.kind === "selection"
+            ? "Selection added to chat"
+            : "File added to chat",
+        description: context.path,
+      });
     } catch (error) {
-      setContextError(
-        error instanceof Error
-          ? error.message
-          : "Could not add context to chat.",
-      );
+      toast.add({
+        id: "repository-context",
+        title: "Could not add context",
+        type: "error",
+        timeout: 10000,
+        description: error instanceof Error ? error.message : "Try again.",
+      });
     }
   }
   const [selection, setSelection] = useState<{
@@ -360,11 +372,6 @@ function FilePane({
           </>
         )}
       </div>
-      {contextError && (
-        <p role="alert" className="border-b p-3 text-xs text-destructive">
-          {contextError}
-        </p>
-      )}
       {file.error && (
         <p role="alert" className="border-b p-3 text-xs text-destructive">
           {file.error}{" "}

@@ -29,6 +29,7 @@ import {
   useGroupRef,
 } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/toast";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -58,17 +59,20 @@ import {
 
 export function Workspace({ user }: { user: Viewer }) {
   const { resolvedTheme, setTheme } = useTheme();
-  const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
 
   async function signOut() {
     setPending(true);
-    setError("");
     try {
       await apiRequest("/auth/sign-out", "POST", {});
       window.location.replace("/");
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Sign-out failed.");
+      toast.add({
+        title: "Sign-out failed",
+        description: error instanceof Error ? error.message : "Try again.",
+        type: "error",
+        timeout: 10000,
+      });
     } finally {
       setPending(false);
     }
@@ -121,20 +125,6 @@ export function Workspace({ user }: { user: Viewer }) {
 
   return (
     <div className="workspace-shell flex min-h-dvh flex-col">
-      {error && (
-        <div className="flex items-center justify-between gap-4 border-b px-4 py-3 text-xs">
-          <p role="alert" className="text-destructive">
-            {error}
-          </p>
-          <Button
-            variant="ghost"
-            className="rounded-none text-xs"
-            onClick={() => window.location.reload()}
-          >
-            reload
-          </Button>
-        </div>
-      )}
       <ThreadStateProvider>
         <SavedWorkspace renderHeader={renderHeader} />
       </ThreadStateProvider>
@@ -426,10 +416,14 @@ function ProjectWorkspace({
       );
       onThreadSave(result);
       setSelected(result.id);
+      toast.add({ title: "Thread created", description: result.name });
     } catch (error) {
-      setError(
-        error instanceof Error ? error.message : "Unable to create thread.",
-      );
+      toast.add({
+        title: "Could not create thread",
+        description: error instanceof Error ? error.message : "Try again.",
+        type: "error",
+        timeout: 10000,
+      });
     } finally {
       setPending(false);
     }
@@ -443,6 +437,7 @@ function ProjectWorkspace({
       await apiRequest(`/threads/${deleteTarget.id}`, "DELETE");
       store.forget(deleteTarget.id);
       onThreadDelete(deleteTarget.id);
+      toast.add({ title: "Thread deleted", description: deleteTarget.name });
       setDeleteTarget(undefined);
     } catch (error) {
       setError(error instanceof Error ? error.message : "Deletion failed.");
@@ -608,14 +603,6 @@ function ProjectWorkspace({
                 </div>
               ))}
             </nav>
-            {error && (
-              <p
-                role="alert"
-                className="px-4 py-2 text-[11px] text-destructive"
-              >
-                {error}
-              </p>
-            )}
             <div className="mt-auto border-t p-3">
               <ProjectSettings project={project} onSave={onProjectSave} />
               <p
@@ -680,6 +667,7 @@ function ThreadControls({
           version: thread.version,
         }),
       );
+      toast.add({ title: "Thread settings saved", description: name });
     } catch (error) {
       setError(
         error instanceof Error ? error.message : "Unable to save thread.",

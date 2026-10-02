@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { PatchDiff } from "@pierre/diffs/react";
+import { toast } from "./ui/toast";
 import {
   ChevronDown,
   ChevronRight,
@@ -130,10 +131,6 @@ function ReviewFiles({
   setCollapsed: React.Dispatch<React.SetStateAction<Set<string>>>;
 }) {
   const [results, setResults] = useState<Record<string, DiffResult>>({});
-  const [contextError, setContextError] = useState<{
-    path: string;
-    message: string;
-  }>();
   const loader = useRef<ReturnType<typeof loadBranchDiffs> | null>(null);
   const files = useRef(new Map<string, HTMLButtonElement>());
   const id = useId();
@@ -275,17 +272,26 @@ function ReviewFiles({
                     disabled={!patch?.trim()}
                     onClick={() => {
                       if (!patch?.trim()) return;
-                      setContextError(undefined);
                       try {
                         onAddContext({
                           kind: "diff",
                           path: file.path,
                           content: patch,
                         });
+                        toast.add({
+                          id: "repository-context",
+                          type: "success",
+                          timeout: 5000,
+                          title: "Diff added to chat",
+                          description: file.path,
+                        });
                       } catch (error) {
-                        setContextError({
-                          path: file.path,
-                          message:
+                        toast.add({
+                          id: "repository-context",
+                          title: "Could not add diff",
+                          type: "error",
+                          timeout: 10000,
+                          description:
                             error instanceof Error
                               ? error.message
                               : "Could not add diff to context. Try again.",
@@ -300,14 +306,6 @@ function ReviewFiles({
                   </button>
                 )}
               </div>
-              {contextError?.path === file.path && (
-                <p
-                  role="alert"
-                  className="break-words border-b px-4 py-2 text-destructive"
-                >
-                  {contextError.message}
-                </p>
-              )}
               <div id={`${id}-${index}`} hidden={!expanded}>
                 {expanded &&
                   (!result || result.state === "loading" ? (

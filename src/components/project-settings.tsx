@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { Settings2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/toast";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -41,6 +42,10 @@ export function ProjectSettings({
       );
       onSave(result);
       setOpen(false);
+      toast.add({
+        title: project ? "Project settings saved" : "Project created",
+        description: result.name,
+      });
     } catch (error) {
       setError(
         error instanceof Error ? error.message : "Unable to save project.",

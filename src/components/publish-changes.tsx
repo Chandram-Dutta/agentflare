@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Button } from "./ui/button";
+import { toast } from "./ui/toast";
 import { Input } from "./ui/input";
 import {
   Dialog,
@@ -44,6 +45,11 @@ export function PublishChanges({
       );
       setTarget(undefined);
       onPublished();
+      toast.add({
+        title: published
+          ? "Pull request updated"
+          : "Draft pull request created",
+      });
     } catch (error) {
       setError(error instanceof Error ? error.message : "Publishing failed.");
     } finally {
