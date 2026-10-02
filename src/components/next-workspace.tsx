@@ -4,6 +4,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
   useTransition,
   useSyncExternalStore,
@@ -51,6 +52,14 @@ import {
 } from "@/lib/workspace-route";
 import type { Project, Thread, WorkspaceData } from "@/lib/workspace";
 import type { Viewer } from "@/server/auth";
+import type { RepositoryFileLink } from "@/lib/repository-links";
+import {
+  createRepositoryContext,
+  appendRepositoryContext,
+} from "@/lib/repository-context";
+import { BranchDiffReview } from "./branch-diff-review";
+
+type ReviewContext = Parameters<typeof createRepositoryContext>[0];
 
 const ReviewContent = createContext<ReactNode>(null);
 
@@ -120,6 +129,10 @@ function WorkspaceShell({
   const [sidebar, setSidebar] = useState(true);
   const [agent, setAgent] = useState(true);
   const [deleting, setDeleting] = useState<Thread>();
+  const [fileToOpen, setFileToOpen] = useState<{
+    threadId: string;
+    file: RepositoryFileLink;
+  }>();
   const narrow = useSyncExternalStore(
     subscribeNarrow,
     () => window.matchMedia("(max-width: 900px)").matches,
@@ -491,6 +504,33 @@ function WorkspaceShell({
                       project={project}
                       narrow={narrow}
                       view={route?.view ?? "overview"}
+                      fileToOpen={
+                        fileToOpen?.threadId === change.id
+                          ? fileToOpen.file
+                          : undefined
+                      }
+                      onFileOpened={() => setFileToOpen(undefined)}
+                      onAddContext={(context) => {
+                        const current = store.get(change.id);
+                        if (
+                          current.pending ||
+                          current.snapshot?.saved ||
+                          current.snapshot?.status !== "ready"
+                        ) {
+                          throw new Error(
+                            "Connect the agent and wait for it to be ready before adding context.",
+                          );
+                        }
+                        const attachments = appendRepositoryContext(
+                          current.attachments,
+                          createRepositoryContext(context),
+                          current.snapshot?.promptCapabilities,
+                          current.draft,
+                        );
+                        store.update(change.id, { attachments });
+                        setAgent(true);
+                        setMobilePane("agent");
+                      }}
                     />
                   ) : (
                     <section className="mx-auto max-w-2xl p-6 sm:p-10">
@@ -550,7 +590,19 @@ function WorkspaceShell({
                 aria-label="Resize agent conversation"
               />
               <Panel id="agent" defaultSize="30%" minSize="260px">
-                <DeveloperPane key={change.id} change={change} />
+                <DeveloperPane
+                  key={change.id}
+                  change={change}
+                  onOpenFile={(file) => {
+                    setFileToOpen({ threadId: change.id, file });
+                    setMobilePane("review");
+                    startNavigation(() =>
+                      router.push(
+                        workspaceHref(change.projectId, change.id, "code"),
+                      ),
+                    );
+                  }}
+                />
               </Panel>
             </>
           )}
@@ -607,14 +659,30 @@ function ChangeReview({
   project,
   view,
   narrow,
+  fileToOpen,
+  onFileOpened,
+  onAddContext,
 }: {
   change: Thread;
   project: Project;
   view: ChangeView;
   narrow: boolean;
+  fileToOpen?: RepositoryFileLink;
+  onFileOpened: () => void;
+  onAddContext: (context: ReviewContext) => void;
 }) {
   const state = useThreadState(change.id);
   const review = state.repository?.review;
+  const { resolvedTheme } = useTheme();
+  const inspector = useRef<{ openFile: (file: RepositoryFileLink) => void }>(
+    null,
+  );
+  useEffect(() => {
+    if (view === "code" && fileToOpen && inspector.current) {
+      inspector.current.openFile(fileToOpen);
+      onFileOpened();
+    }
+  }, [view, fileToOpen, onFileOpened]);
   return (
     <div className="flex h-full min-h-0 flex-col">
       <nav
@@ -641,6 +709,7 @@ function ChangeReview({
           >
             <RepositoryInspector
               key={change.id}
+              ref={inspector}
               projectId={project.id}
               threadId={change.id}
               base={`/threads/${change.id}/runtime`}
@@ -648,6 +717,15 @@ function ChangeReview({
               navigationFirst
               stacked={narrow}
               initialTab="changes"
+              onAddContext={onAddContext}
+              renderBranchReview={(branch) => (
+                <BranchDiffReview
+                  base={`/threads/${change.id}/runtime`}
+                  review={branch}
+                  themeType={resolvedTheme === "dark" ? "dark" : "light"}
+                  onAddContext={onAddContext}
+                />
+              )}
               started={Boolean(
                 state.hydrated &&
                   state.runtime?.started &&
@@ -719,7 +797,13 @@ function ChangeReview({
   );
 }
 
-function DeveloperPane({ change }: { change: Thread }) {
+function DeveloperPane({
+  change,
+  onOpenFile,
+}: {
+  change: Thread;
+  onOpenFile: (file: RepositoryFileLink) => void;
+}) {
   const store = useThreadStore();
   const state = useThreadState(change.id);
   const [controls, setControls] = useState<HTMLDivElement | null>(null);
@@ -737,6 +821,7 @@ function DeveloperPane({ change }: { change: Thread }) {
           key={change.id}
           threadId={change.id}
           headerTarget={controls}
+          onOpenFile={onOpenFile}
         />
       ) : (
         <div className="p-5 text-xs leading-5">

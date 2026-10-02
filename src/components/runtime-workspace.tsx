@@ -6,6 +6,7 @@ import {
   useImperativeHandle,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
   type Ref,
 } from "react";
@@ -13,7 +14,12 @@ import { useTheme } from "next-themes";
 import { Panel, Separator } from "react-resizable-panels";
 import { RefreshCw, Files, FileDiff, GitBranch } from "lucide-react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { File, PatchDiff } from "@pierre/diffs/react";
+import { PatchDiff } from "@pierre/diffs/react";
+import { RepositoryFileTabs } from "./repository-file-tabs";
+import {
+  RepositoryViewer,
+  type RepositoryContext,
+} from "@/lib/repository-viewer";
 import { AcpConversation } from "./acp-conversation";
 import { Button } from "./ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
@@ -207,6 +213,8 @@ export function RepositoryInspector({
   initialTab = "files",
   navigationFirst = false,
   stacked = false,
+  onAddContext,
+  renderBranchReview,
   ref,
 }: {
   base: string;
@@ -217,6 +225,8 @@ export function RepositoryInspector({
   initialTab?: string;
   navigationFirst?: boolean;
   stacked?: boolean;
+  onAddContext?: (context: RepositoryContext) => void;
+  renderBranchReview?: (review: BranchReview) => ReactNode;
   ref?: Ref<RepositoryInspectorHandle>;
 }) {
   const { resolvedTheme } = useTheme();
@@ -232,7 +242,37 @@ export function RepositoryInspector({
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [view, setView] = useState<RepositoryView | undefined>(cached?.view);
+  const [branchReviewOpen, setBranchReviewOpen] = useState(
+    cached?.branchReviewOpen ?? false,
+  );
+  const [fileViewer] = useState(
+    () =>
+      new RepositoryViewer(
+        cached?.viewer ??
+          (cached?.view?.content !== undefined
+            ? {
+                paths: [cached.view.path],
+                active: cached.view.path,
+                cache: { [cached.view.path]: cached.view },
+              }
+            : undefined),
+        (path) =>
+          apiRequest<{ content?: string }>(
+            viewUrl(base, path),
+            "GET",
+            undefined,
+            AbortSignal.timeout(15000),
+          ),
+      ),
+  );
+  const viewerState = useSyncExternalStore(
+    fileViewer.subscribe,
+    fileViewer.getSnapshot,
+    fileViewer.getSnapshot,
+  );
+  const [view, setView] = useState<RepositoryView | undefined>(
+    cached?.view?.content === undefined ? cached?.view : undefined,
+  );
   const selection = useRef((cached?.view as RepositoryView)?.navigationId ?? 0);
   const selected = useRef<{ path: string; staged?: boolean | "branch" }>(
     cached?.selected,
@@ -244,12 +284,24 @@ export function RepositoryInspector({
           files,
           changes,
           review,
+          viewer: viewerState,
+          branchReviewOpen,
           view,
           tab,
           selected: selected.current,
         },
       });
-  }, [store, threadId, files, changes, review, view, tab]);
+  }, [
+    store,
+    threadId,
+    files,
+    changes,
+    review,
+    view,
+    tab,
+    viewerState,
+    branchReviewOpen,
+  ]);
   useEffect(() => {
     if (!started) return;
     let cancelled = false;
@@ -271,9 +323,10 @@ export function RepositoryInspector({
         setChanges(git.changes);
         setReview(branch);
         setError("");
+        void fileViewer.refresh();
         const current = selected.current;
         const request = selection.current;
-        if (current) {
+        if (current && current.staged !== undefined) {
           const result = await apiRequest<{ content?: string; patch?: string }>(
             viewUrl(base, current.path, current.staged),
           );
@@ -309,7 +362,7 @@ export function RepositoryInspector({
       clearTimeout(timer);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, [base, revision, started]);
+  }, [base, revision, started, fileViewer]);
   const open = useCallback(
     async (
       path: string,
@@ -319,8 +372,14 @@ export function RepositoryInspector({
       const request = ++selection.current;
       selected.current = { path, staged };
       setView(undefined);
-      setPending(true);
+      setBranchReviewOpen(false);
       setError("");
+      if (staged === undefined) {
+        setPending(false);
+        fileViewer.open({ path, ...lines });
+        return;
+      }
+      setPending(true);
       try {
         const result = await apiRequest<{ content?: string; patch?: string }>(
           viewUrl(base, path, staged),
@@ -347,7 +406,7 @@ export function RepositoryInspector({
         if (request === selection.current) setPending(false);
       }
     },
-    [base],
+    [base, fileViewer],
   );
   useImperativeHandle(
     ref,
@@ -368,11 +427,15 @@ export function RepositoryInspector({
         className="flex h-full min-w-0 flex-col"
         aria-label="File and diff view"
       >
-        <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b px-3 text-xs">
-          <span className="truncate" title={view?.path}>
-            {view ? `${view.path} / ${view.label}` : "file / diff"}
-          </span>
-          {view && (
+        {(view || pending || (branchReviewOpen && renderBranchReview)) && (
+          <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b px-3 text-xs">
+            <span className="truncate" title={view?.path}>
+              {branchReviewOpen
+                ? "All changes"
+                : view
+                  ? `${view.path} / ${view.label}`
+                  : "file / diff"}
+            </span>
             <button
               type="button"
               className="text-muted-foreground hover:text-foreground"
@@ -381,12 +444,14 @@ export function RepositoryInspector({
                 selection.current++;
                 selected.current = undefined;
                 setView(undefined);
+                setPending(false);
+                setBranchReviewOpen(false);
               }}
             >
-              close
+              back to files
             </button>
-          )}
-        </div>
+          </div>
+        )}
         {error && (
           <p role="alert" className="p-3 text-xs text-destructive">
             {error}
@@ -397,16 +462,13 @@ export function RepositoryInspector({
             loading…
           </p>
         )}
-        {view ? (
+        {branchReviewOpen && renderBranchReview && review ? (
+          <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+            {renderBranchReview(review)}
+          </div>
+        ) : view ? (
           <div className="min-h-0 flex-1 overflow-auto">
-            {view.content !== undefined ? (
-              <RepositoryFileView
-                key={view.navigationId}
-                view={view}
-                content={view.content}
-                themeType={themeType}
-              />
-            ) : view.patch ? (
+            {view.patch ? (
               <PatchDiff
                 patch={view.patch}
                 options={{
@@ -421,9 +483,13 @@ export function RepositoryInspector({
           </div>
         ) : (
           !pending && (
-            <p className="p-4 text-xs text-muted-foreground">
-              Select a file or Git change to review it here.
-            </p>
+            <RepositoryFileTabs
+              viewer={fileViewer}
+              themeType={themeType}
+              threadId={threadId}
+              onOpenFile={(file) => void open(file.path, undefined, file)}
+              onAddContext={onAddContext}
+            />
           )
         )}
       </section>
@@ -499,6 +565,26 @@ export function RepositoryInspector({
                   review={review}
                   onPublished={() => setRevision((v) => v + 1)}
                 />
+                {renderBranchReview && (
+                  <button
+                    type="button"
+                    className="my-2 w-full border px-2 py-2 text-left hover:bg-muted"
+                    aria-pressed={branchReviewOpen}
+                    onClick={() => {
+                      selection.current++;
+                      selected.current = undefined;
+                      setView(undefined);
+                      setPending(false);
+                      setError("");
+                      setBranchReviewOpen(true);
+                    }}
+                  >
+                    All changes{" "}
+                    <span className="text-muted-foreground">
+                      ({review.changes.length})
+                    </span>
+                  </button>
+                )}
                 {review.changes.length === 0 && (
                   <p className="mt-3">No branch changes.</p>
                 )}
@@ -578,39 +664,4 @@ export function RepositoryInspector({
 
 function viewUrl(base: string, path: string, staged?: boolean | "branch") {
   return `${base}/${staged === "branch" ? "branch-diff" : staged === undefined ? "file" : "diff"}?path=${encodeURIComponent(path)}&staged=${staged === true}`;
-}
-
-function RepositoryFileView({
-  view,
-  content,
-  themeType,
-}: {
-  view: RepositoryFileLink;
-  content: string;
-  themeType: "light" | "dark";
-}) {
-  const scrolled = useRef(false);
-  return (
-    <File
-      file={{ name: view.path, contents: content }}
-      selectedLines={
-        view.startLine
-          ? { start: view.startLine, end: view.endLine ?? view.startLine }
-          : undefined
-      }
-      options={{
-        themeType,
-        onPostRender: (node, _instance, phase) => {
-          if (phase === "unmount" || scrolled.current || !view.startLine)
-            return;
-          const line = node.shadowRoot?.querySelector<HTMLElement>(
-            `[data-line="${view.startLine}"]`,
-          );
-          if (!line) return;
-          line.scrollIntoView({ block: "center", inline: "nearest" });
-          scrolled.current = true;
-        },
-      }}
-    />
-  );
 }

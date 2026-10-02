@@ -13,6 +13,8 @@ import { Button } from "./ui/button";
 import { AcpMessages } from "./acp-messages";
 import { AcpComposerControls } from "./acp-composer-controls";
 import { AcpAttachments } from "./acp-attachments";
+import { AcpMentionInput } from "./acp-mention-input";
+import { promptActionSchema } from "@/lib/acp-content";
 import type { RepositoryLinkProps } from "./chat-markdown";
 import type { AcpAction } from "@/lib/acp";
 import { useThreadStore, useThreadState } from "./thread-state";
@@ -41,6 +43,7 @@ export function AcpConversation({
 } & RepositoryLinkProps) {
   const store = useThreadStore();
   const [attachmentReading, setAttachmentReading] = useState(false);
+  const [sendError, setSendError] = useState("");
   const {
     snapshot,
     draft: prompt,
@@ -48,7 +51,6 @@ export function AcpConversation({
     error: networkError,
     pending: actionPending,
   } = useThreadState(threadId);
-  const setPrompt = (draft: string) => store.update(threadId, { draft });
   const transcript = useRef<HTMLDivElement>(null);
   const action = (value: AcpAction) => store.action(threadId, value);
   useLayoutEffect(() => {
@@ -77,16 +79,34 @@ export function AcpConversation({
     if (
       (!text && !attachments?.length) ||
       snapshot?.status !== "ready" ||
+      snapshot.saved ||
       actionPending ||
       attachmentReading
     )
       return;
-    await action({
+    const payload = {
       type: "prompt",
       text,
       attachments,
       requestId: crypto.randomUUID(),
-    });
+    } as const;
+    if (!promptActionSchema.safeParse(payload).success) {
+      setSendError(
+        "Message or attachments exceed their limits. Shorten the message or remove context; nothing was sent.",
+      );
+      return;
+    }
+    if (
+      attachments?.some((block) => block.type === "resource") &&
+      !snapshot.promptCapabilities?.embeddedContext
+    ) {
+      setSendError(
+        "This agent does not support embedded context. Remove context before sending.",
+      );
+      return;
+    }
+    setSendError("");
+    await action(payload);
   }
 
   const loginUrl = snapshot?.login ? safeLoginUrl(snapshot.login.url) : null;
@@ -384,32 +404,32 @@ export function AcpConversation({
           onAction={(value) => void action(value)}
         />
         <AcpAttachments
+          key={threadId}
           attachments={attachments ?? []}
           capabilities={snapshot?.promptCapabilities}
           disabled={!idle || actionPending}
-          onChange={(attachments) => store.update(threadId, { attachments })}
+          onChange={(next) => {
+            const current = store.get(threadId);
+            if (current.attachments !== attachments || current.pending)
+              throw new Error(
+                "Attachments changed while reading. Please try again.",
+              );
+            store.update(threadId, { attachments: next });
+          }}
           onReadingChange={setAttachmentReading}
         />
         <div className="mx-auto flex w-full max-w-3xl items-end gap-2">
-          <textarea
-            aria-label="Message Codex"
-            value={prompt}
-            maxLength={16000}
-            rows={2}
-            disabled={!idle || actionPending}
+          <AcpMentionInput
+            key={threadId}
+            threadId={threadId}
+            disabled={!idle || actionPending || attachmentReading}
             placeholder={
               idle
-                ? "Describe a developer task…"
+                ? "Describe a developer task… @ to reference a file"
                 : saved
                   ? "Resume workspace to continue"
                   : "Codex is not ready"
             }
-            onChange={(event) => setPrompt(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey))
-                event.currentTarget.form?.requestSubmit();
-            }}
-            className="min-h-12 min-w-0 flex-1 resize-y border bg-background p-2 leading-5 outline-offset-2 focus-visible:outline-primary disabled:opacity-60"
           />
           <Button
             type="submit"
@@ -428,6 +448,11 @@ export function AcpConversation({
             <ArrowUp className="size-4" aria-hidden="true" />
           </Button>
         </div>
+        {sendError && (
+          <p role="alert" className="mx-auto mt-1 max-w-3xl text-destructive">
+            {sendError}
+          </p>
+        )}
         <p className="mx-auto mt-1 flex w-full max-w-3xl items-center justify-between text-[10px] leading-4 text-muted-foreground">
           <span title="Ctrl/⌘ + Enter to send">⌘/Ctrl ↵</span>
           <span>{prompt.length}/16000</span>

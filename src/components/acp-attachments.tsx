@@ -1,9 +1,10 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { Paperclip, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { FileText, Paperclip, X } from "lucide-react";
 import type { AcpContent, AcpSnapshot } from "@/lib/acp";
 import { attachmentLimit, encodedBytes, mediaUrl } from "@/lib/acp-content";
+import { repositoryContextLabel } from "@/lib/repository-context";
 
 function base64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -28,6 +29,14 @@ export function AcpAttachments({
   onReadingChange: (reading: boolean) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      onReadingChange(false);
+    };
+  }, [onReadingChange]);
   const [reading, setReading] = useState(false);
   const [error, setError] = useState("");
   const supported =
@@ -89,6 +98,7 @@ export function AcpAttachments({
       }
       if (encodedBytes(next) > attachmentLimit)
         throw new Error("Attachments must fit within 1.4 MB total.");
+      if (!mounted.current) return;
       onChange(next);
     } catch (error) {
       setError(
@@ -96,7 +106,7 @@ export function AcpAttachments({
       );
     } finally {
       setReading(false);
-      onReadingChange(false);
+      if (mounted.current) onReadingChange(false);
       if (input.current) input.current.value = "";
     }
   }
@@ -130,20 +140,27 @@ export function AcpAttachments({
           </>
         )}
         {attachments.map((block, index) => {
+          const contextLabel = repositoryContextLabel(block);
           const label =
-            block.type === "resource"
+            contextLabel ??
+            (block.type === "resource"
               ? decodeURIComponent(
                   block.resource.uri.split("/").at(-1) ?? "Resource",
                 )
               : block.type === "image" && block.uri
                 ? decodeURIComponent(block.uri.split("/").at(-1) ?? "Image")
-                : block.type;
+                : block.type);
           return (
             <span
               key={index}
               className="flex max-w-full items-center gap-2 rounded-md border bg-background px-2 py-1 text-[11px]"
             >
-              <span className="truncate">{label}</span>
+              {contextLabel && (
+                <FileText className="size-3 shrink-0" aria-hidden="true" />
+              )}
+              <span className="truncate" title={label}>
+                {label}
+              </span>
               <button
                 type="button"
                 aria-label={`Remove ${label}`}

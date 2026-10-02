@@ -10,6 +10,8 @@ export type RepositoryState = {
   files: string[];
   changes: GitChange[];
   review?: BranchReview;
+  viewer?: import("./repository-viewer").ViewerState;
+  branchReviewOpen?: boolean;
   view?: {
     path: string;
     content?: string;
