@@ -199,7 +199,7 @@ before building to avoid running both workloads at once.
 
 ## Operations and troubleshooting
 
-### Computer preview on the Next environment
+### Native runtime deployment
 
 `env.next` adds `Computers` (`ComputerThread`), `ComputerAuth`
 (`ComputerCredentials`) and an `ARTIFACTS` namespace binding. It uses

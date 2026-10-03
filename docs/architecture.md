@@ -6,11 +6,11 @@ Agentflare owns account access, workspaces, code review, and publishing. Codex
 owns model and tool execution through an Agent Client Protocol (ACP) adapter.
 There is no browser terminal in the current UI.
 
-## Next: DO-owned native containers (preview)
+## DO-owned native containers
 
 Each account/thread has one Durable Object and one native Linux filesystem.
-The persisted runtime name and class remain `computer` / `ComputerThread` to
-retain ownership and checkpoint identities, but execution uses `ctx.container`
+The persisted runtime name is `computer`, backed by the `NativeThread` class.
+Execution uses `ctx.container`
 directly: no computerd, FUSE, filesystem push/pull, or Artifacts save dependency.
 Existing `user` runtimes remain on the original shared sandbox described below.
 

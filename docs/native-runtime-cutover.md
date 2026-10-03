@@ -1,15 +1,15 @@
-# Next native-runtime cutover
+# Native-runtime cutover
 
 This is **not an ordinary Worker deploy**. Cloudflare's container scheduling policy
 is immutable and its replacement requires a new Durable Object namespace.
-The approved Next testing reset replaces `ComputerThread` with `NativeThread`,
+The approved testing reset in `env.next` replaces `ComputerThread` with `NativeThread`,
 deletes the old namespace, and discards existing test threads. Account credentials
 remain in `ComputerCredentials`. The original production `ThreadSandbox` is unaffected.
 Never apply this destructive reset to an installation with work to preserve.
 
 ## Before touching the running application
 
-1. Stop accepting new Next work and let current turns finish. Record every Next
+1. Stop accepting work in the target environment and let current turns finish. Record every
    thread's owner, DO identity, checkpoint pointer and last successful save time.
 2. Export and verify a fresh `/workspace` archive and matching conversation from
    every live workspace using the existing runtime. The old Artifacts error must
@@ -24,9 +24,9 @@ Never apply this destructive reset to an installation with work to preserve.
 ## Approved cutover and canary
 
 Follow Cloudflare's [scheduling-policy migration guide](https://developers.cloudflare.com/containers/guides/migrate-to-durable-object-scheduling-policy/)
-to replace **only** the Next ComputerThread container application. A new namespace
+to replace **only** the target `ComputerThread` container application. A new namespace
 is required; preserving work instead requires an explicit export/import process.
-For the approved disposable-testing reset, remove old Next thread records and
+For the approved disposable-testing reset, remove old test thread records and
 delete the old container application before deploying migration `v3-native-runtime`.
 Deploy `v3` with the old class still exported and the `Computers` binding switched
 to `NativeThread`. Only after that succeeds deploy `v4-retire-computer` and remove
@@ -34,7 +34,7 @@ the old export: Cloudflare rejects deletion while the existing binding reference
 Deploy the matching Worker and named `workspace` image. Do not run this against
 `agentflare-web` or its shared sandbox application.
 
-Before reopening work, verify on a disposable Next thread:
+Before reopening work, verify on a disposable thread in the target environment:
 
 - `/run` is tmpfs; source, ignored files and rollouts are ordinary native disk.
 - A turn stays alive with the browser closed, through a DO restart.

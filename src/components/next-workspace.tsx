@@ -403,9 +403,6 @@ function WorkspaceShell({
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3 text-xs">
         <Link href="/workspace" className="shrink-0 font-medium">
           agentflare<span className="text-primary">_</span>
-          <span className="ml-2 hidden text-[10px] text-muted-foreground sm:inline">
-            next
-          </span>
         </Link>
         <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
         <select
@@ -710,7 +707,7 @@ function WorkspaceShell({
                               "https://github.com/",
                               "",
                             )
-                          : "Agentflare Next / development preview"}
+                          : "Agentflare"}
                       </p>
                       <h1 className="mt-4 text-2xl">
                         {project ? project.name : "Projects"}
